@@ -2,8 +2,8 @@
 
 TikTok LIVE Comment Hub là công cụ chạy local trên Mac để thu comment TikTok LIVE, gom câu hỏi trùng và hỗ trợ streamer quản lý hàng chờ trả bài.
 
-**Demo/tài liệu:** https://taanhluan.github.io/tiktoklivetracking/  
-**Mã nguồn:** https://github.com/taanhluan/tiktoklivetracking
+**Demo/tài liệu:** https://huppota.github.io/tiktoklivetracking/
+**Mã nguồn:** https://github.com/HuppoTa/tiktoklivetracking
 
 > GitHub Pages chỉ là trang giới thiệu và demo bằng dữ liệu hư cấu. Bản đó không thể tự thu TikTok LIVE; collector thật cần backend Node.js đang chạy.
 
@@ -24,7 +24,7 @@ TikTok LIVE Comment Hub là công cụ chạy local trên Mac để thu comment 
 ## Cài đặt
 
 ```bash
-git clone https://github.com/taanhluan/tiktoklivetracking.git
+git clone https://github.com/HuppoTa/tiktoklivetracking.git
 cd tiktoklivetracking
 npm install
 npm start

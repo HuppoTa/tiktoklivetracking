@@ -133,8 +133,8 @@ Không đưa nội dung thật trong `data/comments.json` vào prompt, issue, lo
 
 ## 5.1 Deployment chính thức
 
-- Repository: https://github.com/taanhluan/tiktoklivetracking
-- GitHub Pages: https://taanhluan.github.io/tiktoklivetracking/
+- Repository: https://github.com/HuppoTa/tiktoklivetracking
+- GitHub Pages: https://huppota.github.io/tiktoklivetracking/
 - `.github/workflows/ci.yml` chạy syntax check và unit test bằng fixture hư cấu, với collector bị tắt.
 - `.github/workflows/pages.yml` publish duy nhất thư mục `docs/` bằng GitHub Actions chính thức.
 - GitHub Pages là landing, tài liệu và demo tĩnh; không chạy Express, Socket.IO hay TikTok collector.
