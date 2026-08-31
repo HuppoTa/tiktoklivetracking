@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Demo và tài liệu TikTok LIVE Comment Hub.">
+  <title>TikTok LIVE Comment Hub — Demo</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="#top">LIVE Comment Hub</a><a href="https://github.com/taanhluan/tiktoklivetracking">GitHub ↗</a></header>
+  <main id="top">
+    <section class="hero">
+      <div><span class="badge">CHẾ ĐỘ DEMO</span><h1>TikTok LIVE<br><em>Comment Hub</em></h1><p>Quản lý hàng đợi câu hỏi trong TikTok LIVE: gom câu hỏi lặp, theo dõi người hỏi và đánh dấu đã trả bài.</p><div class="actions"><a class="primary" href="https://github.com/taanhluan/tiktoklivetracking">Xem mã nguồn</a><a href="#install">Hướng dẫn cài đặt</a></div></div>
+      <aside><strong>Đây là bản mô phỏng giao diện.</strong> Để thu TikTok LIVE thật, hãy cài và chạy ứng dụng Node.js trên máy.</aside>
+    </section>
+    <section class="features" aria-label="Tính năng">
+      <article><b>Comment realtime</b><span>Đồng bộ bình luận qua Socket.IO.</span></article><article><b>Gom câu hỏi lặp</b><span>Giữ nội dung gốc và đếm số lần hỏi.</span></article><article><b>Theo người hỏi</b><span>Nhận biết một ID có nhiều câu.</span></article><article><b>Đã trả bài</b><span>Tick hoàn thành và hoàn tác.</span></article><article><b>Viewer analytics</b><span>Số quan sát từ collector.</span></article><article><b>Đổi TikTok ID</b><span>Chuyển target ngay trên app local.</span></article><article><b>Xuất CSV</b><span>Xuất dữ liệu theo phiên LIVE.</span></article><article><b>Nhiều tab</b><span>Đồng bộ thao tác realtime.</span></article>
+    </section>
+    <section class="demo" aria-labelledby="demo-title">
+      <div class="demo-head"><div><span class="badge">DEMO DATA</span><h2 id="demo-title">Hàng chờ trả bài</h2></div><button id="change-target" type="button">Đổi TikTok ID</button></div>
+      <div class="metrics"><div><span>Target demo</span><b id="target">@studio.demo</b></div><div><span>Viewer demo</span><b>128</b></div><div><span>Peak demo</span><b>241</b></div></div>
+      <nav class="tabs" aria-label="Bộ lọc câu hỏi"><button class="active" data-tab="pending">Chưa trả <span id="pending-count"></span></button><button data-tab="users">Theo người hỏi</button><button data-tab="answered">Đã trả <span id="answered-count"></span></button></nav>
+      <div id="queue" class="queue" aria-live="polite"></div>
+    </section>
+    <section id="install" class="install"><div><span class="eyebrow">CHẠY COLLECTOR THẬT</span><h2>Cài trên máy trong vài phút</h2><p>Ứng dụng đọc livestream công khai, không cần cookie hay mật khẩu TikTok. Dữ liệu lưu local và <code>data/</code> không được đưa lên GitHub.</p></div><pre><code>git clone https://github.com/taanhluan/tiktoklivetracking.git
+cd tiktoklivetracking
+npm install
+npm start
+
+# Mở http://localhost:3000</code></pre></section>
+  </main>
+  <dialog id="target-dialog"><form method="dialog"><h2>Đổi TikTok ID — demo</h2><p>Thao tác này chỉ đổi nhãn mô phỏng, không kết nối TikTok.</p><label>TikTok ID <input id="target-input" value="studio.demo" maxlength="24" pattern="[A-Za-z0-9._]+" required></label><div><button value="cancel">Hủy</button><button id="save-target" value="default">Lưu demo</button></div></form></dialog>
+  <footer>GitHub Pages chỉ cung cấp tài liệu và demo tĩnh. Backend Node.js/collector vẫn phải chạy trên máy hoặc server riêng.</footer>
+  <script src="./app.js"></script>
+</body>
+</html>

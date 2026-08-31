@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TikTok LIVE Comment Hub</title>
+  <link rel="stylesheet" href="/style.css">
+  <style>.linkBtn{border:0;background:transparent;color:#52665b;text-decoration:underline;font-size:11px;cursor:pointer}.targetModal{width:min(480px,calc(100% - 28px));border:0;border-radius:18px;padding:0;box-shadow:0 24px 80px #10201855}.targetModal::backdrop{background:#0a1510aa;backdrop-filter:blur(3px)}.targetModal form{padding:22px}.modalHead{display:flex;justify-content:space-between;align-items:flex-start}.modalHead h2{margin:5px 0 20px}.eyebrow.dark{color:#6c7c73}.iconBtn{border:0;background:#edf1ee;border-radius:50%;width:32px;height:32px;font-size:21px;cursor:pointer}.targetModal label{font-size:12px;font-weight:750;display:block;margin-bottom:7px}.targetModal input{width:100%;border:1px solid #cfd9d3;border-radius:10px;padding:12px;font-size:14px;outline:none}.targetModal input:focus{border-color:#608548;box-shadow:0 0 0 3px #c7ec9b66}.hint{display:block;color:#7d8982;font-size:10px;margin-top:6px}.modalError{background:#fff0f0;color:#932d2d;border-radius:8px;padding:9px;font-size:11px}.targetModal h3{font-size:11px;margin:18px 0 8px;color:#69766e}.recentTargets{display:flex;gap:7px;flex-wrap:wrap}.recentTargets button{border:1px solid #dce4df;background:#f7f9f7;border-radius:20px;padding:7px 10px;color:#425148;cursor:pointer}.modalActions{display:flex;justify-content:flex-end;gap:8px;margin-top:24px}@media(max-width:520px){.linkBtn{display:none}.targetModal form{padding:17px}}</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brandMark">◉</span><div><b>LIVE Comment Hub</b><small id="headerTarget">@kathyuyen.ta</small></div><button id="changeTarget" class="linkBtn">Đổi tài khoản</button></div>
+    <div class="actions"><a class="btn ghost" href="/api/export.csv">Xuất CSV</a><button id="retry" class="btn ghost" hidden>Thử lại ngay</button><button id="toggle" class="btn">Dừng thu</button></div>
+  </header>
+  <main>
+    <section class="hero">
+      <div><span class="eyebrow">HÀNG ĐỢI TRẢ BÀI</span><h1>Quản lý câu hỏi LIVE</h1><p id="message">Đang khởi động collector...</p></div>
+      <span id="liveBadge" class="badge connecting"><i></i> KẾT NỐI</span>
+    </section>
+
+    <section id="errorBanner" class="errorBanner" role="alert" hidden></section>
+    <section class="stats">
+      <article title="Số người đang xem tại sample TikTok gần nhất"><b id="currentViewers">—</b><span>Đang xem</span></article>
+      <article title="Số người xem đồng thời cao nhất collector ghi nhận trong phiên"><b id="peakViewers">—</b><span>Cao nhất phiên</span></article>
+      <article><b id="unansweredCount">0</b><span>Chưa trả bài</span></article>
+      <article><b id="answeredCount">0</b><span>Đã trả bài</span></article>
+      <article><b id="completionRate">0%</b><span>Tỷ lệ xử lý</span></article>
+    </section>
+    <section class="observedMetrics panel" title="Số liệu được collector ghi nhận từ các event TikTok LIVE và có thể thấp hơn thống kê chính thức của TikTok.">
+      <span><b id="memberJoinEvents">0</b> Lượt vào ghi nhận</span>
+      <span><b id="uniqueJoinedUsers">0</b> Người xem ghi nhận</span>
+      <span><b id="averageWait">—</b> Chờ trung bình</span>
+      <span id="viewerFreshness">Chưa nhận dữ liệu viewer</span>
+      <span class="info">ⓘ Số liệu collector ghi nhận, không phải tổng view chính thức</span>
+    </section>
+
+    <section class="toolbar panel">
+      <nav class="tabs" aria-label="Chế độ hiển thị">
+        <button class="tab active" data-tab="unanswered">Chưa trả bài <span id="unansweredBadge">0</span></button>
+        <button class="tab" data-tab="users">Theo người hỏi</button>
+        <button class="tab" data-tab="answered">Đã trả bài</button>
+      </nav>
+      <div class="filters"><input id="search" type="search" placeholder="Tìm nội dung, nickname, @username..."><select id="sort"></select><select id="timeRange" title="Khoảng thời gian"><option value="0">Cả phiên</option><option value="15">15 phút</option><option value="60">1 giờ</option><option value="180">3 giờ</option></select></div>
+    </section>
+
+    <section class="workspace">
+      <div class="panel queuePanel">
+        <div id="queue" class="queue"></div>
+      </div>
+      <aside class="panel livePanel">
+        <div class="panelHead"><div><h2>Comment trực tiếp</h2><small>Luồng mới nhất từ TikTok LIVE</small></div><span id="commentCount" class="pill">0</span></div>
+        <div id="comments" class="liveComments"></div>
+      </aside>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status"><span id="toastMessage"></span><button id="toastAction" hidden>Hoàn tác</button></div>
+  <dialog id="targetModal" class="targetModal"><form id="targetForm" method="dialog">
+    <div class="modalHead"><div><span class="eyebrow dark">THEO DÕI TIKTOK LIVE</span><h2>Đổi tài khoản</h2></div><button type="button" id="closeTarget" class="iconBtn" aria-label="Đóng">×</button></div>
+    <label for="targetInput">TikTok ID</label><input id="targetInput" autocomplete="off" placeholder="@username hoặc URL TikTok LIVE"><small class="hint">Chỉ gồm chữ cái, chữ số, dấu chấm và dấu gạch dưới.</small>
+    <p id="targetError" class="modalError" hidden></p><div id="recentBlock"><h3>Gần đây</h3><div id="recentTargets" class="recentTargets"></div></div>
+    <div class="modalActions"><button type="button" id="cancelTarget" class="btn ghost">Hủy</button><button type="submit" id="connectTarget" class="btn" disabled>Kết nối</button></div>
+  </form></dialog>
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

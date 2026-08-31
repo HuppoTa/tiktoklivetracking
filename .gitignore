@@ -1,0 +1,13 @@
+node_modules/
+data/
+data/*.json
+data/*.backup.json
+data/*.tmp
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+dist/
+.tmp/
