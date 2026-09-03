@@ -43,8 +43,8 @@ export class NeonStorage {
   }
 
   async initialize() {
-    await this.sql(CREATE_TABLE);
-    await this.sql(CREATE_BACKUPS_TABLE);
+    await this.execute(CREATE_TABLE);
+    await this.execute(CREATE_BACKUPS_TABLE);
     const rows = await this.sql`
       SELECT state
       FROM app_state
@@ -60,6 +60,10 @@ export class NeonStorage {
     }
     await this.save();
     return this.store;
+  }
+
+  execute(query) {
+    return this.sql.query ? this.sql.query(query) : this.sql(query);
   }
 
   load() {
