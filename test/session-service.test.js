@@ -49,3 +49,26 @@ test("comment và hàng đợi được phân tách theo session", () => {
   assert.equal(service.getQuestions({ sessionId: "s2" }).length, 1);
   assert.equal(data.comments.find(item => item.id === "m2").sessionId, "s2");
 });
+
+test("cùng room reconnect dùng session cũ, room mới tạo session mới", () => {
+  const data = store(), service = new SessionService(data, () => new Date("2026-01-01T00:00:00Z"));
+  service.ensurePending("account.a", 1); const first = service.attachRoom("account.a", "room-1", 1).session;
+  assert.equal(service.attachRoom("account.a", "room-1", 2).session.id, first.id);
+  const second = service.attachRoom("account.a", "room-2", 3).session;
+  assert.notEqual(second.id, first.id); assert.equal(first.status, "ended"); assert.equal(first.endReason, "room_changed");
+});
+
+test("kết thúc giữ dữ liệu và start mới không copy", () => {
+  const data = store(), service = new SessionService(data, () => new Date("2026-01-01T00:00:00Z"));
+  const first = service.ensurePending("account.a"); data.comments.push({ id: "m1", sessionId: first.id });
+  service.end(first.id); const second = service.start("account.a");
+  assert.equal(data.comments.length, 1); assert.notEqual(second.id, first.id); assert.equal(data.comments.some(item => item.sessionId === second.id), false);
+});
+
+test("delete chỉ đúng session, chặn active và reset answers giữ record", () => {
+  const data = store(), service = new SessionService(data, () => new Date("2026-01-01T00:00:00Z"));
+  const first = service.ensurePending("account.a"); data.comments.push({ id: "m1", sessionId: first.id }); data.questionThreads.push({ id: "q1", sessionId: first.id, answered: true, answeredAt: "2026-01-01T01:00:00Z" });
+  assert.throws(() => service.deleteSession(first.id), /ACTIVE_SESSION/);
+  service.end(first.id); const reset = service.resetAnswers(first.id); assert.equal(reset.updated, 1); assert.equal(data.questionThreads[0].answered, false); assert.equal(data.comments.length, 1);
+  service.deleteSession(first.id); assert.equal(data.comments.length, 0); assert.equal(data.questionThreads.length, 0);
+});

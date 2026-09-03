@@ -1,12 +1,13 @@
 export function initialDashboardState() {
   return {
-    comments: [], questions: [], users: [],
+    comments: [], questions: [], users: [], gifts: [], giftAttention: [], giftSettings: {},
     target: { username: "kathyuyen.ta", displayUsername: "@kathyuyen.ta" },
-    settings: { recentTargets: ["kathyuyen.ta"] }, activeSession: null,
+    settings: { recentTargets: ["kathyuyen.ta"], questionDebug: false }, activeSession: null, selectedSession: null, sessions: [],
     status: { state: "idle", message: "Chưa kết nối" },
     analytics: {
       questions: { unanswered: 0, answered: 0, total: 0, completionRate: 0, averageWaitSeconds: 0 },
-      viewers: { current: null, peak: null, memberJoinEvents: 0, uniqueJoinedUsers: 0, lastUpdatedAt: null, source: "tiktok-live-connector-observed" }
+      viewers: { current: null, peak: null, memberJoinEvents: 0, uniqueJoinedUsers: 0, lastUpdatedAt: null, source: "tiktok-live-connector-observed" },
+      gifts: { giftUsers:0, giftEvents:0, giftQuantity:0, knownDiamonds:0, unknownValueGiftEvents:0, giftUsersWaitingForQuestion:0, giftQuestionsUnanswered:0, giftQuestionsAnswered:0, giftAttentionUnacknowledged:0 }
     },
     tab: "unanswered"
   };
@@ -19,14 +20,18 @@ export function normalizeDashboardPayload(payload = {}, current = initialDashboa
     ...current,
     target: payload.target && typeof payload.target === "object" ? { ...current.target, ...payload.target } : current.target,
     settings: payload.settings && typeof payload.settings === "object" ? { ...current.settings, ...payload.settings } : current.settings,
-    activeSession: payload.activeSession && typeof payload.activeSession === "object" ? payload.activeSession : current.activeSession,
+    activeSession: payload.activeSession && typeof payload.activeSession === "object" ? payload.activeSession : null,
+    selectedSession: payload.selectedSession && typeof payload.selectedSession === "object" ? payload.selectedSession : (payload.activeSession && typeof payload.activeSession === "object" ? payload.activeSession : current.selectedSession),
+    sessions: array(payload.sessions),
     status: payload.status && typeof payload.status === "object" ? { ...current.status, ...payload.status } : current.status,
     comments: array(payload.comments),
     questions: array(payload.questions),
     users: array(payload.users),
+    gifts: array(payload.gifts), giftAttention: array(payload.giftAttention), giftSettings: payload.giftSettings || current.giftSettings,
     analytics: payload.analytics && typeof payload.analytics === "object" ? {
       questions: { ...current.analytics.questions, ...(payload.analytics.questions || {}) },
-      viewers: { ...current.analytics.viewers, ...(payload.analytics.viewers || {}) }
+      viewers: { ...current.analytics.viewers, ...(payload.analytics.viewers || {}) },
+      gifts: { ...(current.analytics.gifts || {}), ...(payload.analytics.gifts || {}) }
     } : current.analytics
   };
 }
@@ -48,6 +53,15 @@ export function mergeQuestionUpdate(state, payload) {
     state.questions.push({ occurrences: [], commentIds: [], ...payload });
   }
   return true;
+}
+
+export function acceptsSessionEvent(state, payload) {
+  return Boolean(payload?.sessionId && state.selectedSession?.id && payload.sessionId === state.selectedSession.id);
+}
+
+export function clearSelectedSessionState(state, session = null) {
+  state.selectedSession = session; state.comments = []; state.questions = []; state.users = [];
+  state.analytics = initialDashboardState().analytics; return state;
 }
 
 export function mergeUserUpdate(state, payload) {
@@ -90,14 +104,20 @@ export function restoreQuestion(state, snapshot) {
   return snapshot ? mergeQuestionUpdate(state, snapshot) : false;
 }
 
-export function selectQuestions(state, { answered, search = "", sort = "latest", minutes = 0 } = {}) {
+export function selectQuestions(state, { answered, search = "", sort = "queue", minutes = 0 } = {}) {
   const query = String(search).trim().toLowerCase();
   const cutoff = minutes > 0 ? Date.now() - minutes * 60_000 : null;
-  const rows = array(state.questions).filter(thread => thread &&
+  const rows = array(state.questions).filter(thread => thread && thread.deleted !== true && (!state.selectedSession?.id || thread.sessionId === state.selectedSession.id) &&
     (typeof answered !== "boolean" || Boolean(thread.answered) === answered) &&
     (!query || `${thread.canonicalText || ""} ${thread.nickname || ""} ${thread.username || ""}`.toLowerCase().includes(query)) &&
     (!cutoff || new Date(thread.lastAskedAt).getTime() >= cutoff));
-  if (sort === "repeats") rows.sort((a, b) => (b.repeatCount || 0) - (a.repeatCount || 0) || String(b.lastAskedAt).localeCompare(String(a.lastAskedAt)));
+  if (sort === "queue") rows.sort((a,b) => {
+    const manualFirst=state.giftSettings?.manualPriorityOverridesGift!==false;
+    const pin=Number(Boolean(b.manualPinned))-Number(Boolean(a.manualPinned));if(manualFirst&&pin)return pin;
+    if(state.giftSettings?.enabled!==false&&state.giftSettings?.giftPriorityEnabled!==false){const gift=Number(Boolean(b.giftPriority))-Number(Boolean(a.giftPriority));if(gift)return gift;if(a.giftPriority&&b.giftPriority){const diamonds=Number(b.giftSummary?.totalDiamonds||0)-Number(a.giftSummary?.totalDiamonds||0);if(diamonds)return diamonds;const time=String(a.giftPriorityAt||"").localeCompare(String(b.giftPriorityAt||""));if(time)return time}}
+    if(!manualFirst&&pin)return pin;return(a.priorityRank??a.queueNumber??Infinity)-(b.priorityRank??b.queueNumber??Infinity)||(a.queueNumber??Infinity)-(b.queueNumber??Infinity);
+  });
+  else if (sort === "repeats") rows.sort((a, b) => (b.repeatCount || 0) - (a.repeatCount || 0) || String(b.lastAskedAt).localeCompare(String(a.lastAskedAt)));
   else if (sort === "oldest") rows.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   else if (sort === "asked") rows.sort((a, b) => String(b.lastAskedAt).localeCompare(String(a.lastAskedAt)));
   else if (sort === "user") rows.sort((a, b) => String(a.nickname || a.username).localeCompare(String(b.nickname || b.username), "vi"));
@@ -107,6 +127,7 @@ export function selectQuestions(state, { answered, search = "", sort = "latest",
 }
 
 export function emptyStateFor(tab) {
+  if (tab === "gifts") return { title: "Không có gift cần chú ý", detail: "Gift chưa có câu hỏi sẽ xuất hiện tại đây." };
   if (tab === "answered") return { title: "Chưa có câu đã trả", detail: "Các câu hoàn thành sẽ được lưu tại đây." };
   if (tab === "users") return { title: "Chưa ghi nhận người hỏi", detail: "Người đặt câu hỏi sẽ xuất hiện tại đây." };
   return { title: "Đã xử lý hết câu hỏi trong hàng chờ.", detail: "Câu hỏi mới sẽ tự động xuất hiện tại đây." };

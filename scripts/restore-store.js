@@ -1,0 +1,6 @@
+import { copyFile, readFile, rename, writeFile } from "node:fs/promises"; import { dirname,resolve,join,basename } from "node:path";
+const args=process.argv.slice(2), value=flag=>{const i=args.indexOf(flag);return i>=0?args[i+1]:null}; const source=value("--source"),target=value("--target"),confirmation=value("--confirmation"),apply=args.includes("--apply");
+if(!source||!target)throw new Error("Required: --source <backup> --target <store>"); const src=resolve(source),dst=resolve(target),parsed=JSON.parse(await readFile(src,"utf8"));
+const summary={schemaVersion:parsed.schemaVersion??null,sessionCount:(parsed.sessions||[]).length,commentCount:(parsed.comments||[]).length,threadCount:(parsed.questionThreads||[]).length,dryRun:!apply};
+if(!apply){console.log(JSON.stringify(summary));process.exit(0)} if(confirmation!=="RESTORE_STORE")throw new Error("Invalid confirmation");
+const safety=`${dst}.pre-restore-${Date.now()}.backup.json`; await copyFile(dst,safety); const temp=join(dirname(dst),`.${basename(dst)}.${process.pid}.restore.tmp`); await writeFile(temp,JSON.stringify(parsed,null,2)); JSON.parse(await readFile(temp,"utf8")); await rename(temp,dst); console.log(JSON.stringify({...summary,dryRun:false,safetyBackupCreated:true}));

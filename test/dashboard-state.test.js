@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  emptyStateFor, initialDashboardState, mergeQuestionUpdate, mergeViewerUpdate,
+  acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeQuestionUpdate, mergeViewerUpdate,
   normalizeDashboardPayload, restoreQuestion, selectQuestions,
   setQuestionAnsweredLocally, snapshotQuestion
 } from "../public/dashboard-state.js";
@@ -16,6 +16,18 @@ test("regression white-screen: partial socket update merge theo id không làm m
   assert.equal(mergeQuestionUpdate(state, { id: "q1", answered: true, answeredAt: "2026-01-01T00:02:00Z" }), true);
   assert.equal(state.questions[0].canonicalText, "Câu hỏi mẫu?");
   assert.deepEqual(state.questions[0].occurrences, [{ id: "m1" }]);
+});
+
+test("frontend chỉ nhận socket event của selected session", () => {
+  const state = initialDashboardState(); state.selectedSession = { id: "s2" };
+  assert.equal(acceptsSessionEvent(state, { sessionId: "s1" }), false);
+  assert.equal(acceptsSessionEvent(state, { sessionId: "s2" }), true);
+});
+
+test("đổi selected session clear dữ liệu hiển thị cũ", () => {
+  const state = initialDashboardState(); state.comments = [{ id: "m1" }]; state.questions = [thread()];
+  clearSelectedSessionState(state, { id: "s2" });
+  assert.equal(state.selectedSession.id, "s2"); assert.deepEqual(state.comments, []); assert.deepEqual(state.questions, []);
 });
 
 test("PATCH lỗi có thể rollback snapshot đầy đủ", () => {

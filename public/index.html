@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>TikTok LIVE Comment Hub</title>
   <link rel="stylesheet" href="/style.css">
-  <style>.linkBtn{border:0;background:transparent;color:#52665b;text-decoration:underline;font-size:11px;cursor:pointer}.targetModal{width:min(480px,calc(100% - 28px));border:0;border-radius:18px;padding:0;box-shadow:0 24px 80px #10201855}.targetModal::backdrop{background:#0a1510aa;backdrop-filter:blur(3px)}.targetModal form{padding:22px}.modalHead{display:flex;justify-content:space-between;align-items:flex-start}.modalHead h2{margin:5px 0 20px}.eyebrow.dark{color:#6c7c73}.iconBtn{border:0;background:#edf1ee;border-radius:50%;width:32px;height:32px;font-size:21px;cursor:pointer}.targetModal label{font-size:12px;font-weight:750;display:block;margin-bottom:7px}.targetModal input{width:100%;border:1px solid #cfd9d3;border-radius:10px;padding:12px;font-size:14px;outline:none}.targetModal input:focus{border-color:#608548;box-shadow:0 0 0 3px #c7ec9b66}.hint{display:block;color:#7d8982;font-size:10px;margin-top:6px}.modalError{background:#fff0f0;color:#932d2d;border-radius:8px;padding:9px;font-size:11px}.targetModal h3{font-size:11px;margin:18px 0 8px;color:#69766e}.recentTargets{display:flex;gap:7px;flex-wrap:wrap}.recentTargets button{border:1px solid #dce4df;background:#f7f9f7;border-radius:20px;padding:7px 10px;color:#425148;cursor:pointer}.modalActions{display:flex;justify-content:flex-end;gap:8px;margin-top:24px}@media(max-width:520px){.linkBtn{display:none}.targetModal form{padding:17px}}</style>
+  <script src="/runtime-config.js"></script>
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="brandMark">◉</span><div><b>LIVE Comment Hub</b><small id="headerTarget">@kathyuyen.ta</small></div><button id="changeTarget" class="linkBtn">Đổi tài khoản</button></div>
-    <div class="actions"><a class="btn ghost" href="/api/export.csv">Xuất CSV</a><button id="retry" class="btn ghost" hidden>Thử lại ngay</button><button id="toggle" class="btn">Dừng thu</button></div>
+    <div class="actions"><button id="giftSettingsButton" class="btn ghost">Cài đặt quà</button><a id="exportCsv" class="btn ghost" href="/api/export.csv">Xuất CSV</a><button id="retry" class="btn ghost" hidden>Thử lại ngay</button><button id="toggle" class="btn">Dừng thu</button></div>
   </header>
   <main>
     <section class="hero">
@@ -19,6 +19,11 @@
     </section>
 
     <section id="errorBanner" class="errorBanner" role="alert" hidden></section>
+    <section class="sessionPanel panel" aria-labelledby="sessionTitle">
+      <div class="sessionTop"><div><span class="eyebrow">PHIÊN LIVE</span><h2 id="sessionTitle">Quản lý dữ liệu theo room</h2></div><div class="sessionControls"><select id="sessionSelect" aria-label="Chọn phiên LIVE"></select><button id="currentSession" class="btn ghost" hidden>Về phiên hiện tại</button><button id="startSession" class="btn ghost">Bắt đầu phiên mới</button><button id="endSession" class="btn ghost">Kết thúc phiên</button></div></div>
+      <div id="sessionSummary" class="sessionSummary"></div>
+      <div class="dangerZone"><button id="resetAnswers" class="btn ghost">Reset trạng thái trả bài</button><button id="deleteSession" class="btn danger">Xóa phiên đang xem</button></div>
+    </section>
     <section class="stats">
       <article title="Số người đang xem tại sample TikTok gần nhất"><b id="currentViewers">—</b><span>Đang xem</span></article>
       <article title="Số người xem đồng thời cao nhất collector ghi nhận trong phiên"><b id="peakViewers">—</b><span>Cao nhất phiên</span></article>
@@ -37,6 +42,7 @@
     <section class="toolbar panel">
       <nav class="tabs" aria-label="Chế độ hiển thị">
         <button class="tab active" data-tab="unanswered">Chưa trả bài <span id="unansweredBadge">0</span></button>
+        <button class="tab" data-tab="gifts">🎁 Cần chú ý <span id="giftBadge">0</span></button>
         <button class="tab" data-tab="users">Theo người hỏi</button>
         <button class="tab" data-tab="answered">Đã trả bài</button>
       </nav>
@@ -48,18 +54,22 @@
         <div id="queue" class="queue"></div>
       </div>
       <aside class="panel livePanel">
-        <div class="panelHead"><div><h2>Comment trực tiếp</h2><small>Luồng mới nhất từ TikTok LIVE</small></div><span id="commentCount" class="pill">0</span></div>
+        <div class="panelHead"><div><h2>Comment trực tiếp</h2><small>Luồng mới nhất từ TikTok LIVE</small></div><div><button id="manualQuestion" class="smallBtn">+ Thêm câu hỏi</button> <span id="commentCount" class="pill">0</span></div></div>
         <div id="comments" class="liveComments"></div>
       </aside>
     </section>
   </main>
   <div id="toast" class="toast" role="status"><span id="toastMessage"></span><button id="toastAction" hidden>Hoàn tác</button></div>
+  <div id="giftToasts" class="giftToasts" aria-live="polite" aria-relevant="additions text"></div>
   <dialog id="targetModal" class="targetModal"><form id="targetForm" method="dialog">
     <div class="modalHead"><div><span class="eyebrow dark">THEO DÕI TIKTOK LIVE</span><h2>Đổi tài khoản</h2></div><button type="button" id="closeTarget" class="iconBtn" aria-label="Đóng">×</button></div>
     <label for="targetInput">TikTok ID</label><input id="targetInput" autocomplete="off" placeholder="@username hoặc URL TikTok LIVE"><small class="hint">Chỉ gồm chữ cái, chữ số, dấu chấm và dấu gạch dưới.</small>
     <p id="targetError" class="modalError" hidden></p><div id="recentBlock"><h3>Gần đây</h3><div id="recentTargets" class="recentTargets"></div></div>
     <div class="modalActions"><button type="button" id="cancelTarget" class="btn ghost">Hủy</button><button type="submit" id="connectTarget" class="btn" disabled>Kết nối</button></div>
   </form></dialog>
+  <dialog id="sessionModal" class="targetModal sessionModal"><form id="sessionForm" method="dialog"><div class="modalHead"><div><span class="eyebrow dark">XÁC NHẬN THAO TÁC</span><h2 id="sessionModalTitle">Xác nhận</h2></div><button type="button" id="closeSessionModal" class="iconBtn">×</button></div><p id="sessionModalSummary"></p><label id="sessionConfirmLabel" for="sessionConfirmation">Nhập cụm xác nhận</label><input id="sessionConfirmation" autocomplete="off"><div class="modalActions"><button type="button" id="cancelSessionAction" class="btn ghost">Hủy</button><button type="submit" id="confirmSessionAction" class="btn danger" disabled>Xác nhận</button></div></form></dialog>
+  <dialog id="manualModal" class="targetModal"><form id="manualForm"><div class="modalHead"><div><span class="eyebrow dark">HÀNG ĐỢI</span><h2>Thêm câu hỏi thủ công</h2></div><button type="button" id="closeManual" class="iconBtn">×</button></div><label for="manualUser">Người hỏi</label><select id="manualUser"><option value="">Khách chưa xác định</option></select><label for="manualNickname">Tên hiển thị (nếu là khách mới)</label><input id="manualNickname" maxlength="100"><label for="manualText">Nội dung câu hỏi</label><textarea id="manualText" maxlength="500" required></textarea><label for="manualReason">Ghi chú</label><input id="manualReason" maxlength="200"><p id="manualError" class="modalError" hidden></p><div class="modalActions"><button type="button" id="cancelManual" class="btn ghost">Hủy</button><button type="submit" class="btn">Thêm vào hàng đợi</button></div></form></dialog>
+  <dialog id="giftSettingsModal" class="targetModal"><form id="giftSettingsForm"><div class="modalHead"><div><span class="eyebrow dark">GIFT TRACKING</span><h2>Cài đặt quà</h2></div><button type="button" id="closeGiftSettings" class="iconBtn">×</button></div><div class="settingsGrid"><label>Bật xử lý ưu tiên <input id="giftEnabled" type="checkbox"></label><label>Highlight (giây) <input id="giftHighlightSeconds" type="number" min="0" max="30" required></label><label>Thông báo (giây) <input id="giftNotificationSeconds" type="number" min="1" max="15" required></label><label>Manual pin thắng gift <input id="giftManualFirst" type="checkbox"></label><label>Xử lý event <select id="giftApplyTo"><option value="final-only">Chỉ gift hoàn tất</option></select></label></div><p id="giftSettingsError" class="modalError" hidden></p><div class="modalActions"><button type="button" id="cancelGiftSettings" class="btn ghost">Hủy</button><button id="saveGiftSettings" type="submit" class="btn">Lưu</button></div></form></dialog>
   <script src="/socket.io/socket.io.js"></script>
   <script type="module" src="/app.js"></script>
 </body>

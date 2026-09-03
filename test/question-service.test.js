@@ -9,7 +9,7 @@ function setup() {
 }
 
 function comment(id, userId, text, timestamp = "2026-01-01T00:00:00.000Z") {
-  return { id, timestamp, userId, username: `user.${userId}`, nickname: `User ${userId}`, avatar: "", text, normalizedText: normalizeText(text), question: true };
+  return { id, timestamp, sessionId: "session-a", targetUsername: "account.a", userId, username: `user.${userId}`, nickname: `User ${userId}`, avatar: "", text, normalizedText: normalizeText(text), question: true };
 }
 
 test("hai message cùng ID không tạo hai comment", () => {
@@ -77,4 +77,17 @@ test("thống kê user phân biệt occurrence và thread", () => {
   service.addComment(comment("m3", "u1", "Tình cảm sắp tới ra sao?"));
   const stats = service.getUsers()[0];
   assert.deepEqual({ totalQuestions: stats.totalQuestions, uniqueQuestions: stats.uniqueQuestions, repeatedQuestions: stats.repeatedQuestions, unansweredQuestions: stats.unansweredQuestions }, { totalQuestions: 3, uniqueQuestions: 2, repeatedQuestions: 1, unansweredQuestions: 2 });
+});
+
+test("cùng user cùng nội dung nhưng khác session tạo hai thread", () => {
+  const { store, service } = setup(); const first = comment("m1", "u1", "Công việc sắp tới thế nào?");
+  service.addComment(first); service.addComment({ ...comment("m2", "u1", first.text), sessionId: "session-b" });
+  assert.equal(store.questionThreads.length, 2);
+});
+
+test("lọc chưa trả dựa answered boolean và bỏ deleted", () => {
+  const { service } = setup(); const a = service.addComment(comment("m1", "u1", "Công việc sắp tới thế nào?")).thread;
+  const b = service.addComment(comment("m2", "u1", "Tình cảm sắp tới ra sao?")).thread;
+  a.answered = false; a.answeredAt = "2026-01-01T01:00:00Z"; b.deleted = true;
+  assert.deepEqual(service.getQuestions({ sessionId: "session-a", answered: false }).map(item => item.id), [a.id]);
 });

@@ -1,6 +1,24 @@
 # Project Context — TikTok LIVE Comment Hub
 
+## Trạng thái hiện tại: manual queue + Gift Tracking (schema v7)
+
+Dashboard hỗ trợ ba nguồn thread: `classifier`, `promoted_comment`, `manual_entry`. Session isolation, TikTok `userId`, classifier scoring và dedupe `sessionId + userId` được giữ nguyên. `queueNumber` lấy từ `session.nextQueueNumber` và không tái sử dụng; `priorityRank` là lớp sắp xếp riêng. Migration v5 → v6 chỉ thêm metadata queue theo thứ tự deterministic, giữ nguyên comment, occurrence, repeatCount và answered state.
+
+API/UI đã có promote comment, nhập câu hỏi, đổi ưu tiên và archive/undo. Analytics tách số thread tự động, promoted và nhập tay.
+
 > Tài liệu handoff dành cho ChatGPT/Codex và developer mới. Đọc file này trước khi đề xuất hoặc triển khai thay đổi.
+
+### Gift Tracking architecture (2026-09-03)
+
+- Connector chuẩn hóa gift legacy/protobuf bằng numeric TikTok `userId`; durable dedupe key là `sessionId + eventId`.
+- `src/gift-service.js` quản lý gift summary, attention, link/transfer và priority; mọi liên kết chỉ trong cùng session/user.
+- Streak interim chỉ là transient event; mặc định `applyTo: final-only`, final mới được persist và tạo notification.
+- Gift trước câu hỏi tạo attention; classifier/promote/manual question đều link trong cùng atomic storage transaction.
+- Queue sort mặc định: manual pin (nếu configured), eligible gift diamond giảm dần, gift time, rồi stable queue number. Các sort explicit không áp dụng gift priority.
+- Notification không persist, gom theo `sessionId + userId + giftId`, tối đa 4 toast và clear khi đổi session.
+- API gồm gifts, attention acknowledge/undo, assign question, strict gift settings và question pin/unpin. Socket event session-scoped; settings là global event có `sessionId: null`.
+- Schema vẫn là 7; notification/highlight là UI state nên không cần schema 8.
+- Verification hiện tại: code/unit/API/two-client verified; browser visual và LIVE thật phải báo riêng, không suy diễn thành pass.
 
 ## 1. Dự án là gì?
 
@@ -30,6 +48,16 @@ Mục tiêu sản phẩm tiếp theo:
 Ngày cập nhật tài liệu: **2026-08-31**.
 
 Giai đoạn hiện tại: **MVP hàng đợi, viewer analytics và multi-target session đã triển khai**.
+
+### Session isolation schema v5 (local, 2026-08-31)
+
+- Session được khóa theo TikTok `roomId`; reconnect cùng room dùng lại session, room/target mới đóng session cũ.
+- Collector dùng `processInitialData: false` và chỉ nhận event sau khi connection hiện tại trả room ID hợp lệ.
+- Comment có `sessionId`, `roomId`, `connectionGeneration`, `receivedAt`, `eventTimestamp`, `questionScore` và `questionReasons`.
+- API hỗ trợ xem session cụ thể; Socket event khác selected session bị frontend bỏ qua.
+- Có UI/API kết thúc, bắt đầu, reset trả bài và xóa session có typed confirmation + backup.
+- Storage schema hiện tại là v5; record thật trong `data/` vẫn bị Git ignore.
+- Question detection dùng scoring threshold `0.60`, nhận tarot/trải bài không có dấu hỏi và loại greeting/emoji/date-only.
 
 Đã hoàn thành:
 

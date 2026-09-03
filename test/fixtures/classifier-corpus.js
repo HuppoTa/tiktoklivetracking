@@ -1,0 +1,5 @@
+const positiveBases = ["công việc sắp tới thế nào", "tình cảm có tốt không", "người cũ có quay lại không", "xem giúp em tài chính tháng tới", "cho em hỏi học tập năm nay", "gia đình sắp tới ra sao", "sức khỏe có ổn không", "coi giúp chuyện sự nghiệp", "xin xem tình duyên", "bao giờ có việc mới", "em còn duyên không", "trải bài công việc giúp em"];
+const negativeBases = ["hello cả nhà", "cảm ơn chị nhiều", "xinh quá chị", "đúng rồi đó", "em mới vào", "xin vía may mắn", "chúc chị vui", "hay quá", "ok chị", "tặng chị hoa", "hôm nay trời đẹp", "em đang xem live"];
+const variants = ["", " ạ", " nha", " nhé", "!!!", "...", " số một", " cho mình", " hôm nay", " luôn", " nè", " với", " ah", " hen", " thôi"];
+const rows=[]; for(const base of positiveBases)for(const suffix of variants)rows.push({text:`${base}${suffix}`,expected:true,topic:base.split(" ")[0]}); for(const base of negativeBases)for(const suffix of variants)rows.push({text:`${base}${suffix}`,expected:false,topic:"non-question"});
+export const developmentCorpus=rows.filter((_,i)=>i%5!==0); export const holdoutCorpus=rows.filter((_,i)=>i%5===0); export const classifierCorpus=rows;

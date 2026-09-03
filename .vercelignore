@@ -1,0 +1,15 @@
+data/
+docs/
+test/
+src/
+server.js
+railway.json
+PROJECT_CONTEXT.md
+README.md
+scripts/benchmark-storage.js
+scripts/check-runtime.js
+scripts/evaluate-classifier.js
+scripts/restore-store.js
+scripts/verify-backup.js
+scripts/audit-metadata.js
+.env.example

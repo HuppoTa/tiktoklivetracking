@@ -12,6 +12,7 @@ export function normalizeText(value) {
     text = text.replaceAll(normalizedPhrase, " ");
   }
   return text
+    .replace(/\b(tcam|t\s*\/\s*cam|t cam|tduyen)\b/g, " tinh cam ")
     .replace(/\b(a|ah|ạ|nha|nhe|nhé|voi|với)\b/g, " ")
     .replace(/[^a-z0-9\s/.-]/g, " ")
     .replace(/\s+/g, " ")
@@ -25,11 +26,12 @@ export function extractDates(value) {
 }
 
 const TOPICS = {
-  "tinh-cam": ["tinh cam", "nguoi cu", "yeu", "moi quan he", "quay lai", "doc than"],
+  "tinh-cam": ["tinh cam", "tinh duyen", "td", "yeu duong", "nguoi cu", "yeu", "moi quan he", "quay lai", "doc than"],
   "cong-viec": ["cong viec", "su nghiep", "viec lam"],
   "tai-chinh": ["tai chinh", "tien bac", "thu nhap", "kinh doanh"],
   "gia-dinh": ["gia dinh", "ba me", "vo chong", "con cai"],
-  "suc-khoe": ["suc khoe", "benh", "the trang"]
+  "suc-khoe": ["suc khoe", "benh", "the trang"],
+  "hoc-tap": ["hoc tap", "thi cu", "truong hoc"]
 };
 
 export function detectTopics(value) {

@@ -6,9 +6,14 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test"
+    "build": "node scripts/generate-runtime-config.js",
+    "test": "node --test",
+    "check:runtime": "node scripts/check-runtime.js",
+    "audit:metadata": "node scripts/audit-metadata.js",
+    "evaluate:classifier": "node scripts/evaluate-classifier.js"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "express": "^5.1.0",
     "socket.io": "^4.8.1",
     "tiktok-live-connector": "2.4.4"

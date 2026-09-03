@@ -105,10 +105,11 @@ export function calculateQuestionAnalytics(threads = []) {
   };
 }
 
-export function buildAnalytics(threads, viewerState) {
+export function buildAnalytics(threads, viewerState, gifts = [], attention = []) {
   const viewers = createViewerState(viewerState);
   return {
-    questions: calculateQuestionAnalytics(threads),
+    questions: { ...calculateQuestionAnalytics(threads), classifierCount: threads.filter(item => (item.source || "classifier") === "classifier").length,
+      promotedCount: threads.filter(item => item.source === "promoted_comment").length, manualCount: threads.filter(item => item.source === "manual_entry").length },
     viewers: {
       current: viewers.currentViewers,
       peak: viewers.peakViewers,
@@ -116,6 +117,6 @@ export function buildAnalytics(threads, viewerState) {
       uniqueJoinedUsers: viewers.joinedUserIds.length,
       lastUpdatedAt: viewers.lastViewerUpdateAt,
       source: "tiktok-live-connector-observed"
-    }
+    },gifts:{giftUsers:new Set(gifts.map(g=>g.userId)).size,giftEvents:gifts.length,giftQuantity:gifts.reduce((s,g)=>s+Number(g.repeatCount||0),0),knownDiamonds:gifts.filter(g=>g.valueKnown).reduce((s,g)=>s+Number(g.totalDiamonds||0),0),unknownValueGiftEvents:gifts.filter(g=>!g.valueKnown).length,giftUsersWaitingForQuestion:attention.filter(a=>a.attentionStatus==="waiting_question").length,giftQuestionsUnanswered:threads.filter(q=>q.giftPriority&&!q.answered).length,giftQuestionsAnswered:threads.filter(q=>q.giftSummary&&q.answered).length,giftAttentionUnacknowledged:attention.filter(a=>!a.acknowledged&&a.attentionStatus!=="linked").length}
   };
 }

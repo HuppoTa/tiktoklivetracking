@@ -1,5 +1,18 @@
 # TikTok LIVE Comment Hub
 
+## Hàng đợi và Gift Tracking (schema v7)
+
+- `queueNumber` bất biến theo phiên; đổi ưu tiên chỉ cập nhật `priorityRank`.
+- Có thể nâng comment trực tiếp hoặc nhập câu hỏi thủ công mà không sửa classifier/raw comment.
+- API mới: promote comment, manual question, priority và archive/undo.
+- UI hiển thị badge `#N`, nguồn câu hỏi và nút điều chỉnh ưu tiên.
+- Socket đồng bộ thay đổi queue giữa các tab và luôn kèm metadata session.
+- Gift final được lưu theo `sessionId + eventId`; streak interim không ghi durable totals.
+- Gift được gắn bằng TikTok `userId` vào câu chưa trả cũ nhất, hoặc vào tab `Cần chú ý` nếu người tặng chưa hỏi.
+- Hàng đợi ưu tiên manual pin, diamond giảm dần, thời điểm gift rồi stable `queueNumber` (setting có thể cho gift đứng trước pin).
+- Notification góc phải chỉ nhận event realtime sau khi trang sẵn sàng, tự đóng, gom theo `sessionId + userId + giftId` và không replay lịch sử.
+- UI có cài đặt thời gian toast/highlight, pin/unpin, acknowledge và chuyển gift giữa các câu cùng user/session.
+
 TikTok LIVE Comment Hub là công cụ chạy local trên Mac để thu comment TikTok LIVE, gom câu hỏi trùng và hỗ trợ streamer quản lý hàng chờ trả bài.
 
 **Demo/tài liệu:** https://huppota.github.io/tiktoklivetracking/
@@ -14,6 +27,8 @@ TikTok LIVE Comment Hub là công cụ chạy local trên Mac để thu comment 
 - Checkbox đã trả bài, hoàn tác và đồng bộ nhiều tab bằng Socket.IO.
 - Viewer analytics ghi nhận từ collector.
 - Lưu dữ liệu local theo phiên, đổi tài khoản ngay trên giao diện và xuất CSV.
+- Xem lịch sử phiên LIVE, kết thúc/bắt đầu phiên, reset trả bài và xóa riêng một phiên sau khi tạo backup.
+- Theo dõi gift, ưu tiên câu hỏi và đồng bộ attention/settings giữa nhiều tab.
 
 ## Yêu cầu hệ thống
 
@@ -46,10 +61,14 @@ Sao chép `.env.example` nếu cần tham khảo biến cấu hình; ứng dụn
 npm ci
 node --check server.js
 node --check public/app.js
+node --check public/dashboard-state.js
 npm test
+npm run audit:metadata -- /path/to/copied-store.json
 ```
 
 Test dùng fixture hư cấu và không cần kết nối TikTok. CI đặt `DISABLE_TIKTOK=1` để không khởi tạo collector.
+
+Đặt `QUESTION_DEBUG=true` khi chạy local để xem score và lý do classifier nhận diện câu hỏi.
 
 ## Giới hạn
 
@@ -57,6 +76,9 @@ Test dùng fixture hư cấu và không cần kết nối TikTok. CI đặt `DIS
 - GitHub Pages chỉ host tài liệu/demo tĩnh, không chạy Express, Socket.IO hoặc collector.
 - Collector thật phải chạy bằng Node.js trên máy hoặc server riêng.
 - Viewer analytics là số quan sát được từ event connector và có thể thấp hơn thống kê chính thức.
+- Gift UI hiện ở trạng thái `IMPLEMENTED_NOT_VISUALLY_VERIFIED`; cần click-test bằng browser runtime.
+- Gift trên tài khoản thật ở trạng thái `LIVE_NOT_VERIFIED` nếu tài khoản không LIVE.
+- Chưa có authentication cho người dùng cuối: chỉ chạy loopback/local; public backend vẫn `NO-GO`.
 
 ## Bảo mật dữ liệu
 

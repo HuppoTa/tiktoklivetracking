@@ -1,0 +1,16 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { QuestionService } from "../src/question-service.js";
+
+function fixture() {
+  const store = { comments: [], questionThreads: [], sessions: [{ id:"s1", targetUsername:"demo", roomId:"r1", nextQueueNumber:1 }] };
+  return { store, service:new QuestionService(store) };
+}
+const comment = (id, text="nội dung giả lập") => ({ id, sessionId:"s1", targetUsername:"demo", roomId:"r1", userId:"u1", username:"demo.user", nickname:"Demo", avatar:"", text, normalizedText:text, question:false, timestamp:`2026-01-01T00:00:0${id}.000Z`, receivedAt:`2026-01-01T00:00:0${id}.000Z` });
+
+test("promote comment cấp queue number và gọi lại idempotent", () => { const {store,service}=fixture(); store.comments.push(comment("1")); const a=service.promoteComment("1","s1"); const b=service.promoteComment("1","s1"); assert.equal(a.thread.queueNumber,1); assert.equal(a.thread.source,"promoted_comment"); assert.equal(b.idempotent,true); assert.equal(store.questionThreads.length,1); });
+test("manual entry user có sẵn và khách mới có identity ổn định", () => { const {store,service}=fixture(); store.comments.push(comment("1")); const a=service.createManual({sessionId:"s1",userId:"u1",text:"câu giả lập A"}); const b=service.createManual({sessionId:"s1",nickname:"Khách",text:"câu giả lập B"}); assert.equal(a.thread.queueNumber,1); assert.equal(b.thread.queueNumber,2); assert.match(b.thread.userId,/^manual-user:s1:/); assert.match(b.thread.commentIds[0],/^manual-occurrence:/); });
+test("queue number bất biến khi ưu tiên thay đổi", () => { const {service}=fixture(); const a=service.createManual({sessionId:"s1",nickname:"A",text:"nội dung A"}).thread; const b=service.createManual({sessionId:"s1",nickname:"B",text:"nội dung B"}).thread; service.updatePriority(b.id,"s1","move_to_top"); assert.deepEqual([a.queueNumber,b.queueNumber],[1,2]); assert.equal(b.priorityRank,1); service.updatePriority(b.id,"s1","reset"); assert.equal(a.priorityRank,1); });
+test("archive giữ thread và occurrence, có thể undo", () => { const {store,service}=fixture(); const thread=service.createManual({sessionId:"s1",nickname:"A",text:"nội dung"}).thread; service.archive(thread.id,"s1",true); assert.equal(service.getQuestions({sessionId:"s1"}).length,0); assert.equal(store.comments.length,1); service.archive(thread.id,"s1",false); assert.equal(service.getQuestions({sessionId:"s1"}).length,1); });
+test("user chỉ có manual question vẫn xuất hiện với stats theo thread", () => { const {service}=fixture(); service.createManual({sessionId:"s1",nickname:"Khách giả lập",text:"nội dung manual"}); const user=service.getUsers("s1")[0]; assert.equal(user.uniqueQuestions,1); assert.equal(user.manualQuestions,1); assert.equal(user.totalQuestions,1); assert.equal(user.answeredQuestions,0); });
+test("manual retry với clientRequestId không tạo queue hoặc occurrence mới", () => { const {store,service}=fixture(); const input={sessionId:"s1",nickname:"Khách",text:"nội dung retry",clientRequestId:"request-1"}; const a=service.createManual(input),b=service.createManual(input); assert.equal(b.idempotent,true); assert.equal(a.thread.id,b.thread.id); assert.equal(store.comments.length,1); assert.equal(store.questionThreads.length,1); });

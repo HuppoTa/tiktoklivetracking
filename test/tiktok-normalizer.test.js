@@ -20,3 +20,9 @@ test("event protobuf v3 được chuẩn hóa đúng", () => {
   });
   assert.equal(comment.normalizedText.length > 0, true);
 });
+
+test("normalizer lưu received/event timestamp và forced question", () => {
+  const event = { ...protobufEvent, content: "nội dung mẫu", common: { ...protobufEvent.common, createTime: 1767225590 } };
+  const comment = normalizeTikTokEvent(event, now, { forcedQuestion: true });
+  assert.equal(comment.receivedAt, now.toISOString()); assert.ok(comment.eventTimestamp); assert.equal(comment.question, true); assert.deepEqual(comment.questionReasons, ["tiktok-question-event"]);
+});
