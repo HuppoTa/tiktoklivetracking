@@ -20,7 +20,7 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
 const ALLOW_REMOTE_ACCESS = process.env.ALLOW_REMOTE_ACCESS === "true";
 const APP_AUTH_TOKEN = process.env.APP_AUTH_TOKEN || "";
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "";
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || (process.env.RAILWAY_ENVIRONMENT ? "https://tiktoklivetracking.vercel.app" : "");
 const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 if ((!loopbackHosts.has(HOST) || ALLOW_REMOTE_ACCESS) && !APP_AUTH_TOKEN) throw new Error("REMOTE_ACCESS_REQUIRES_APP_AUTH_TOKEN");
 const DISABLE_TIKTOK = process.env.DISABLE_TIKTOK === "1";

@@ -11,3 +11,4 @@ data/*.tmp
 coverage/
 dist/
 .tmp/
+public/vendor/

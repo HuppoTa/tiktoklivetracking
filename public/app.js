@@ -8,7 +8,9 @@ import { addGiftNotification, clearGiftNotifications, createGiftNotificationStor
 
 const API_BASE = String(globalThis.__APP_CONFIG__?.apiBaseUrl || "").replace(/\/$/, "");
 const SOCKET_URL = String(globalThis.__APP_CONFIG__?.socketUrl || API_BASE || "").replace(/\/$/, "");
-const socket = io(SOCKET_URL || undefined);
+const TOKEN_KEY = "live-comment-hub-auth-token";
+let authToken = sessionStorage.getItem(TOKEN_KEY) || "";
+const socket = io(SOCKET_URL || undefined, { autoConnect: false, auth: callback => callback({ token: authToken }) });
 let state = initialDashboardState();
 const pendingThreads = new Set();
 const pendingUsers = new Set();
@@ -239,8 +241,19 @@ function toast(message, action) {
   toast.timer = setTimeout(() => $("toast").classList.remove("show"), action ? 6000 : 2800);
 }
 
-async function requestJson(url, options = {}) {
-  const response = await fetch(`${API_BASE}${url}`, options);
+function requestAuthToken() {
+  const value = window.prompt("Nhập APP_AUTH_TOKEN để mở dashboard. Token chỉ được giữ trong tab hiện tại.", "");
+  if (!value?.trim()) return false;
+  authToken = value.trim();
+  sessionStorage.setItem(TOKEN_KEY, authToken);
+  return true;
+}
+
+async function requestJson(url, options = {}, allowAuthPrompt = true) {
+  const headers = new Headers(options.headers || {});
+  if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
+  const response = await fetch(`${API_BASE}${url}`, { ...options, headers });
+  if (response.status === 401 && allowAuthPrompt && requestAuthToken()) return requestJson(url, options, false);
   const text = await response.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { throw new Error("Server trả dữ liệu không hợp lệ"); }
@@ -424,7 +437,13 @@ window.addEventListener("error", event => reportError(event.error || new Error(e
 window.addEventListener("unhandledrejection", event => reportError(event.reason, "Một thao tác chưa hoàn tất. Vui lòng thử lại."));
 
 updateSortOptions();
-requestJson("/api/state").then(data => { state = normalizeDashboardPayload(data, state); render(); }).catch(error => reportError(error, "Không tải được dữ liệu dashboard"));
+requestJson("/api/state").then(data => { state = normalizeDashboardPayload(data, state); render(); socket.connect(); }).catch(error => reportError(error, "Không tải được dữ liệu dashboard"));
+socket.on("connect_error", error => {
+  if (String(error?.message || "").includes("UNAUTHORIZED")) {
+    authToken = ""; sessionStorage.removeItem(TOKEN_KEY); socket.disconnect();
+    reportError(error, "Token không hợp lệ. Tải lại trang để nhập lại.");
+  }
+});
 socket.on("status", value => { if (value && typeof value === "object") state.status = { ...state.status, ...value }; renderStatus(); });
 socket.on("comment", comment => { if (!acceptsSessionEvent(state, comment)) return; if (comment?.id && !(state.comments || []).some(item => item?.id === comment.id && item?.sessionId === comment.sessionId)) state.comments.push(comment); renderStats(); renderComments(); });
 socket.on("question:created", thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) { renderStats(); renderQueue(); } });
