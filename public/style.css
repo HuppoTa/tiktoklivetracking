@@ -431,7 +431,6 @@ main {
   background: linear-gradient(180deg, rgba(19,27,32,0.95), rgba(13,18,22,0.96));
   box-shadow: var(--shadow-card);
   transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
-  animation: fadeUp 0.28s ease-out;
 }
 
 .questionCard:hover {
