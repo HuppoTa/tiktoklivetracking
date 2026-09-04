@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const productionBackend = "https://tiktoklivetracking-production.up.railway.app";
+const productionBackend = "https://tiktoklivetracking-api.onrender.com";
 const defaultBackend = process.env.VERCEL ? productionBackend : "";
 const config = {
   apiBaseUrl: process.env.API_BASE_URL || defaultBackend,
