@@ -15,6 +15,27 @@ const REQUEST =
 const FUTURE =
   /\b(sap toi|thang toi|nam nay|tuong lai|quay lai|con duyen|tiep tuc|di tiep|tai hop)\b/;
 
+/**
+ * Những cấu trúc người xem dùng để gửi chủ đề cần Reader xem,
+ * dù không viết thành một câu hỏi đầy đủ.
+ *
+ * Ví dụ:
+ * - về vấn đề học tập
+ * - muốn xem về công việc
+ * - em hỏi về tình duyên
+ */
+const IMPLICIT_READING =
+  /\b(ve van de|van de|muon xem ve|can xem ve|hoi ve|em hoi ve|minh hoi ve|xem ve|coi ve|cho em ve|cho minh ve)\b/;
+
+/**
+ * Nhận diện người xem đang nói rằng họ vừa gửi quà.
+ *
+ * Đây chỉ là tín hiệu hỗ trợ phân loại comment thành câu hỏi.
+ * Không dùng kết quả này để xác nhận gift thật.
+ */
+const GIFT_CLAIM =
+  /(?:\b(vua gui|da gui|gui roi|gui r|moi gui|tang roi|tang r)\b.{0,40}\b(co 4 la|co bon la|4 la|gift|qua)\b)|(?:\b(co 4 la|co bon la|4 la|gift|qua)\b.{0,40}\b(vua gui|da gui|gui roi|gui r|moi gui|tang roi|tang r)\b)/u;
+
 const POLITE_ENDING =
   /\b(a|ah|nha|nhe)\b(?:\s|[^\p{L}\p{N}])*$/u;
 
@@ -28,6 +49,7 @@ const NEGATIVE =
  * qlai hoh ạ -> quay lai khong a
  * QL ko      -> quay lai khong
  * ctay chưa  -> chia tay chua
+ * 4las       -> co 4 la
  */
 function expandTikTokAliases(text) {
   let value = String(text ?? "");
@@ -68,6 +90,16 @@ function expandTikTokAliases(text) {
     [/\bt\s*\/\s*cam\b/g, "tinh cam"],
     [/\bt\s+cam\b/g, "tinh cam"],
     [/\btduyen\b/g, "tinh duyen"],
+
+    // Gift: cỏ 4 lá
+    [/\b4las\b/g, "co 4 la"],
+    [/\b4la\b/g, "co 4 la"],
+    [/\bco\s*4\s*las?\b/g, "co 4 la"],
+    [/\bco\s*bon\s*la\b/g, "co 4 la"],
+
+    // Cách viết trạng thái đã gửi
+    [/\bgui\s*r\b/g, "gui roi"],
+    [/\btang\s*r\b/g, "tang roi"],
   ];
 
   for (const [pattern, replacement] of aliases) {
@@ -77,27 +109,56 @@ function expandTikTokAliases(text) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Chuẩn hóa ngày sinh viết cách nhau bằng khoảng trắng.
+ *
+ * Chỉ chuyển đổi khi chuỗi có dạng ngày/tháng/năm hợp lệ cơ bản:
+ * - 6 5 2012  -> 6/5/2012
+ * - 30 9 2001 -> 30/9/2001
+ *
+ * Tránh chuyển đổi tùy tiện mọi cụm ba con số.
+ */
+function normalizeSpacedDates(text) {
+  return String(text ?? "").replace(
+    /(^|[^\d])(\d{1,2})\s+(\d{1,2})\s+(\d{2,4})(?=$|[^\d])/g,
+    (match, prefix, dayText, monthText, yearText) => {
+      const day = Number(dayText);
+      const month = Number(monthText);
+
+      if (
+        day < 1 ||
+        day > 31 ||
+        month < 1 ||
+        month > 12
+      ) {
+        return match;
+      }
+
+      return `${prefix}${dayText}/${monthText}/${yearText}`;
+    },
+  );
+}
+
+/**
+ * Chuẩn hóa các dấu phân cách ngày sinh thường gặp.
+ *
+ * Ví dụ:
+ * - 6@5@91 -> 6/5/91
+ * - 6*5*91 -> 6/5/91
+ * - 6_5_91 -> 6/5/91
+ */
+function normalizeDateSeparators(text) {
+  return String(text ?? "").replace(
+    /(\d{1,2})\s*[@*_]\s*(\d{1,2})\s*[@*_]\s*(\d{2,4})/g,
+    "$1/$2/$3",
+  );
+}
+
 export function classifyQuestion(
   text,
   { forced = false, system = false } = {},
 ) {
   const raw = String(text ?? "").trim();
-
-  const folded = raw
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/đ/g, "d");
-
-  /*
-   * Alias phải được mở rộng trước khi chạy:
-   * - normalizeText()
-   * - detectTopics()
-   * - ASK
-   * - FUTURE
-   */
-  const expanded = expandTikTokAliases(folded);
-  const normalized = normalizeText(expanded);
 
   if (forced) {
     return {
@@ -119,6 +180,24 @@ export function classifyQuestion(
     };
   }
 
+  const folded = raw
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d");
+
+  /*
+   * Thứ tự xử lý:
+   * 1. Mở rộng từ viết tắt.
+   * 2. Chuẩn hóa dấu phân cách ngày.
+   * 3. Chuẩn hóa ngày dùng khoảng trắng.
+   * 4. Chạy normalizeText của hệ thống hiện tại.
+   */
+  const expanded = expandTikTokAliases(folded);
+  const dateSeparated = normalizeDateSeparators(expanded);
+  const dateNormalized = normalizeSpacedDates(dateSeparated);
+  const normalized = normalizeText(dateNormalized);
+
   const reasons = [];
   let score = 0;
 
@@ -131,7 +210,33 @@ export function classifyQuestion(
   const breakupOrReturnAlias =
     /\b(qlai|q\s*lai|ql|ctay|chiatay|c\s*tay)\b/u.test(folded);
 
-  const firstDigitIndex = raw.search(/\d/);
+  const hasTopic =
+    topics.length > 0 ||
+    relationshipAlias;
+
+  const hasQuestionMark =
+    /[?？]/u.test(raw);
+
+  const hasQuestionWord =
+    ASK.test(normalized);
+
+  const hasRequest =
+    REQUEST.test(normalized);
+
+  const hasFutureIntent =
+    FUTURE.test(normalized);
+
+  const hasImplicitReading =
+    IMPLICIT_READING.test(normalized);
+
+  const hasGiftClaim =
+    GIFT_CLAIM.test(normalized);
+
+  const hasPoliteEnding =
+    POLITE_ENDING.test(folded);
+
+  const firstDigitIndex =
+    raw.search(/\d/);
 
   const textBeforeFirstDate =
     firstDigitIndex >= 0
@@ -140,13 +245,9 @@ export function classifyQuestion(
 
   const personPattern =
     dates.length > 0 &&
-    /[a-zà-ỹ]{2,}\s+[a-zà-ỹ]{2,}/iu.test(textBeforeFirstDate);
-
-  const hasQuestionMark = /[?？]/u.test(raw);
-  const hasQuestionWord = ASK.test(normalized);
-  const hasRequest = REQUEST.test(normalized);
-  const hasFutureIntent = FUTURE.test(normalized);
-  const hasPoliteEnding = POLITE_ENDING.test(folded);
+    /[a-zà-ỹ]{2,}\s+[a-zà-ỹ]{2,}/iu.test(
+      textBeforeFirstDate,
+    );
 
   if (hasQuestionMark) {
     score += 0.45;
@@ -164,11 +265,10 @@ export function classifyQuestion(
   }
 
   /*
-   * Sửa logic cũ:
-   * relationshipAlias vẫn phải được tính là topic,
-   * kể cả khi detectTopics() chưa nhận diện được alias.
+   * relationshipAlias vẫn được xem là topic,
+   * kể cả khi detectTopics() chưa nhận diện alias.
    */
-  if (topics.length || relationshipAlias) {
+  if (hasTopic) {
     score += 0.30;
 
     reasons.push(
@@ -199,18 +299,67 @@ export function classifyQuestion(
   }
 
   /*
-   * Nhận diện đuôi lịch sự:
-   * ạ -> a sau khi folded
-   * à -> a
-   * ah -> ah
+   * Nhận diện câu hỏi/yêu cầu xem bài ngầm:
+   * - về vấn đề học tập
+   * - muốn xem về công việc
+   * - hỏi về tình duyên
    *
-   * Không cộng điểm nếu chỉ có chữ "ạ".
-   * Phải đi cùng từ nghi vấn, yêu cầu xem bài,
-   * hoặc ý định như "quay lại".
+   * Cần đồng thời có topic để hạn chế false positive.
+   */
+  if (hasTopic && hasImplicitReading) {
+    score += 0.30;
+    reasons.push("implicit-question:reading-topic");
+  }
+
+  /*
+   * Ghi nhận câu nói có chứa nội dung khai báo gửi quà.
+   *
+   * Lưu ý:
+   * Đây không phải xác nhận gift thật.
+   * Gift thật phải được xác nhận bằng TikTok GIFT event.
+   */
+  if (hasGiftClaim) {
+    reasons.push("gift-claim-in-comment");
+
+    /*
+     * Chỉ cộng điểm khi comment còn có ngữ cảnh xem bài:
+     * - có chủ đề;
+     * - có câu yêu cầu;
+     * - có cấu trúc câu hỏi ngầm;
+     * - hoặc có ý định tương lai.
+     */
+    if (
+      hasTopic ||
+      hasRequest ||
+      hasImplicitReading ||
+      hasFutureIntent
+    ) {
+      score += 0.15;
+      reasons.push(
+        "implicit-question:gift+reading-context",
+      );
+    }
+  }
+
+  /*
+   * “ạ”, “a”, “ah” không tự động biến mọi comment thành câu hỏi.
+   *
+   * Chỉ cộng điểm nếu trước đó comment đã có:
+   * - từ nghi vấn;
+   * - yêu cầu xem;
+   * - ý định tương lai;
+   * - cấu trúc gửi chủ đề;
+   * - hoặc gift claim đi cùng topic.
    */
   if (
     hasPoliteEnding &&
-    (hasQuestionWord || hasRequest || hasFutureIntent)
+    (
+      hasQuestionWord ||
+      hasRequest ||
+      hasFutureIntent ||
+      hasImplicitReading ||
+      (hasGiftClaim && hasTopic)
+    )
   ) {
     score += 0.10;
     reasons.push("polite-question-ending");
@@ -223,18 +372,22 @@ export function classifyQuestion(
    * - tcam qlai hoh a
    */
   if (
-    (topics.length || relationshipAlias) &&
+    hasTopic &&
     hasFutureIntent
   ) {
     score += 0.10;
-    reasons.push("implicit-question:topic+future");
+    reasons.push(
+      "implicit-question:topic+future",
+    );
   }
 
   const onlySymbols =
     /^(?:[^\p{L}\p{N}]|\s)+$/u.test(raw);
 
   const onlyBirthDate =
-    /^\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$/.test(normalized);
+    /^\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$/.test(
+      normalized,
+    );
 
   if (
     NEGATIVE.test(normalized) ||
