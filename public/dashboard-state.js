@@ -102,6 +102,38 @@ export function setQuestionAnsweredLocally(state, id, answered, answeredAt = new
   return mergeQuestionUpdate(state, { id, answered, answeredAt: answered ? answeredAt : null });
 }
 
+export function setQuestionItemStatusLocally(state, threadId, itemId, status, updatedAt = new Date().toISOString()) {
+  if (!["ANSWERED", "SKIPPED", "WAITING"].includes(status)) return false;
+  const thread = array(state.questions).find(candidate => candidate?.id === threadId);
+  if (!thread || !Array.isArray(thread.questionItems)) return false;
+  const item = thread.questionItems.find(candidate => candidate?.id === itemId);
+  if (!item) return false;
+
+  item.status = status;
+  item.updatedAt = updatedAt;
+  item.answeredAt = status === "ANSWERED" ? updatedAt : null;
+  item.skippedAt = status === "SKIPPED" ? updatedAt : null;
+
+  const pending = thread.questionItems
+    .filter(candidate => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(candidate.status))
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  const active = pending[0] || null;
+  for (const candidate of thread.questionItems) {
+    if (candidate.status === "ACTIVE" && candidate !== active) candidate.status = "WAITING";
+  }
+  if (active?.status === "WAITING") active.status = "ACTIVE";
+
+  thread.activeQuestionId = active?.id || null;
+  thread.activeQuestion = active ? { ...active } : null;
+  thread.answered = !active;
+  thread.answeredAt = thread.answered ? (thread.answeredAt || updatedAt) : null;
+  if (active) {
+    thread.canonicalText = active.text || active.rawText || thread.canonicalText;
+    thread.normalizedText = active.normalizedText || thread.normalizedText;
+  }
+  return true;
+}
+
 export function restoreQuestion(state, snapshot) {
   return snapshot ? mergeQuestionUpdate(state, snapshot) : false;
 }

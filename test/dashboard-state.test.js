@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeQuestionUpdate, mergeViewerUpdate,
   normalizeDashboardPayload, restoreQuestion, selectQuestions,
-  setQuestionAnsweredLocally, snapshotQuestion
+  setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
 } from "../public/dashboard-state.js";
 
 function thread(overrides = {}) {
@@ -50,6 +50,41 @@ test("hoàn tác đưa question trở lại hàng chờ", () => {
   const state = initialDashboardState(); state.questions = [thread({ answered: true, answeredAt: "2026-01-01T00:02:00Z" })];
   setQuestionAnsweredLocally(state, "q1", false);
   assert.equal(selectQuestions(state, { answered: false }).length, 1);
+});
+
+test("item status cập nhật optimistic và chuyển active ngay", () => {
+  const state = initialDashboardState();
+  state.questions = [thread({
+    questionItems: [
+      { id: "i1", text: "Câu một", status: "ACTIVE", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "i2", text: "Câu hai", status: "WAITING", createdAt: "2026-01-01T00:01:00Z" }
+    ],
+    activeQuestionId: "i1",
+    activeQuestion: { id: "i1", text: "Câu một", status: "ACTIVE" }
+  })];
+  const at = "2026-01-01T00:02:00Z";
+  assert.equal(setQuestionItemStatusLocally(state, "q1", "i1", "ANSWERED", at), true);
+  assert.equal(state.questions[0].questionItems[0].answeredAt, at);
+  assert.equal(state.questions[0].questionItems[1].status, "ACTIVE");
+  assert.equal(state.questions[0].activeQuestionId, "i2");
+  assert.equal(state.questions[0].answered, false);
+  assert.equal(state.questions[0].canonicalText, "Câu hai");
+});
+
+test("item cuối xử lý optimistic đưa thread sang đã trả và rollback được", () => {
+  const state = initialDashboardState();
+  state.questions = [thread({
+    questionItems: [{ id: "i1", text: "Câu một", status: "ACTIVE", createdAt: "2026-01-01T00:00:00Z" }],
+    activeQuestionId: "i1",
+    activeQuestion: { id: "i1", text: "Câu một", status: "ACTIVE" }
+  })];
+  const snapshot = snapshotQuestion(state, "q1");
+  assert.equal(setQuestionItemStatusLocally(state, "q1", "i1", "SKIPPED", "2026-01-01T00:02:00Z"), true);
+  assert.equal(state.questions[0].answered, true);
+  assert.deepEqual(selectQuestions(state, { answered: false }), []);
+  restoreQuestion(state, snapshot);
+  assert.equal(state.questions[0].answered, false);
+  assert.equal(state.questions[0].questionItems[0].status, "ACTIVE");
 });
 
 test("socket duplicate update idempotent và không tạo card trùng", () => {

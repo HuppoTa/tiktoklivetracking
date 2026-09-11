@@ -130,7 +130,10 @@ export class NeonStorage {
   readiness() {
     const validation = this.validate();
     return {
-      ready: this.health.loadHealthy && this.health.storageHealthy && validation.ok && this.pendingTransactions === 0,
+      // An in-flight write is normal while a LIVE is active. Marking the
+      // service unready here makes the platform recycle a healthy process
+      // whenever comments or operator actions are being persisted.
+      ready: this.health.loadHealthy && this.health.storageHealthy && validation.ok,
       ...this.health,
       pendingTransactions: this.pendingTransactions,
     };

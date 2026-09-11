@@ -1,7 +1,7 @@
 import {
   acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeQuestionUpdate, mergeUserUpdate,
   mergeViewerUpdate, normalizeDashboardPayload, restoreQuestion, selectQuestions,
-  setQuestionAnsweredLocally, snapshotQuestion
+  setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
 } from "./dashboard-state.js";
 import { normalizeTargetInput } from "./target-input.js";
 import { addGiftNotification, clearGiftNotifications, createGiftNotificationStore, dismissGiftNotification } from "./gift-notifications.js";
@@ -434,15 +434,21 @@ async function updateThreadAnswered(id, answered, { showFeedback = true } = {}) 
 
 async function updateQuestionItemStatus(threadId, itemId, status) {
   if (!threadId || !itemId || pendingThreads.has(threadId)) return false;
-  pendingThreads.add(threadId); renderQueue();
+  const snapshot = snapshotQuestion(state, threadId);
+  if (!snapshot || !setQuestionItemStatusLocally(state, threadId, itemId, status)) {
+    toast("Không tìm thấy câu hỏi"); return false;
+  }
+  pendingThreads.add(threadId); renderStats(); renderQueue();
   try {
     const payload = await requestJson(`/api/questions/${encodeURIComponent(threadId)}/items/${encodeURIComponent(itemId)}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, sessionId: state.selectedSession?.id })
     });
+    if (!payload || payload.id !== threadId) throw new Error("Server trả question update không đầy đủ");
     mergeQuestionUpdate(state, payload); clearError();
     toast(status === "ANSWERED" ? "Đã trả câu này" : status === "SKIPPED" ? "Đã bỏ qua câu này" : "Câu hỏi đã trở lại hàng chờ");
     return true;
   } catch (error) {
+    restoreQuestion(state, snapshot);
     reportError(error, `Không cập nhật được câu hỏi: ${error.message}`); toast(`Không thể cập nhật: ${error.message}`); return false;
   } finally { pendingThreads.delete(threadId); renderStats(); renderQueue(); }
 }

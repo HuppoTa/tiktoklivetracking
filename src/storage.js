@@ -198,7 +198,7 @@ export class JsonStorage {
   enqueue(operation) { const current = this.queue.then(operation, operation); this.queue = current.catch(() => undefined); return current; }
   save() { const snapshot = structuredClone(this.store); return this.enqueue(() => this.persist(snapshot)); }
   mutate(mutator) { return this.enqueue(async () => { this.pendingTransactions += 1; try { const draft = structuredClone(this.store); const result = await mutator(draft); await this.persist(draft); for (const key of Object.keys(this.store)) delete this.store[key]; Object.assign(this.store, draft); return result; } finally { this.pendingTransactions -= 1; } }); }
-  readiness() { const validation = this.validate(); return { ready: this.health.loadHealthy && this.health.storageHealthy && validation.ok && this.pendingTransactions === 0, ...this.health, pendingTransactions: this.pendingTransactions }; }
+  readiness() { const validation = this.validate(); return { ready: this.health.loadHealthy && this.health.storageHealthy && validation.ok, ...this.health, pendingTransactions: this.pendingTransactions }; }
   async backupSession(sessionId) {
     const session = this.store.sessions.find(item => item.id === sessionId); if (!session) throw new Error("SESSION_NOT_FOUND");
     const payload = { schemaVersion: SCHEMA_VERSION, exportedAt: new Date().toISOString(), session,

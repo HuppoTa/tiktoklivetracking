@@ -102,3 +102,10 @@ test("save queue phục hồi sau rename fail và transaction fail không publis
   assert.equal(storage.store.settings.marker, undefined); await storage.mutate(draft => { draft.settings.marker = "committed"; });
   assert.equal(storage.store.settings.marker, "committed"); assert.equal(JSON.parse(await readFile(files.storeFile, "utf8")).settings.marker, "committed");
 });
+
+test("transaction đang ghi không làm health check báo unready", async () => {
+  const files = await paths(); const storage = new JsonStorage(files); await storage.load();
+  storage.pendingTransactions = 2;
+  assert.equal(storage.readiness().ready, true);
+  assert.equal(storage.readiness().pendingTransactions, 2);
+});
