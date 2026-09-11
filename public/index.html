@@ -34,6 +34,7 @@
     <section class="observedMetrics panel" title="Số liệu được collector ghi nhận từ các event TikTok LIVE và có thể thấp hơn thống kê chính thức của TikTok.">
       <span><b id="memberJoinEvents">0</b> Lượt vào ghi nhận</span>
       <span><b id="uniqueJoinedUsers">0</b> Người xem ghi nhận</span>
+      <span class="likeMetric" title="Tổng like TikTok trả về realtime từ event LIKE. TikTok có thể gộp nhiều lượt chạm vào một event."><b id="totalLikes">—</b><em id="likePulse" aria-live="polite" hidden></em> Tổng like TikTok</span>
       <span><b id="averageWait">—</b> Chờ trung bình</span>
       <span id="viewerFreshness">Chưa nhận dữ liệu viewer</span>
       <span class="info">ⓘ Số liệu collector ghi nhận, không phải tổng view chính thức</span>
@@ -54,13 +55,15 @@
         <div id="queue" class="queue"></div>
       </div>
       <aside class="panel livePanel">
-        <div class="panelHead"><div><h2>Comment trực tiếp</h2><small>Luồng mới nhất từ TikTok LIVE</small></div><div><button id="manualQuestion" class="smallBtn">+ Thêm câu hỏi</button> <span id="commentCount" class="pill">0</span></div></div>
+        <div class="panelHead"><div><h2>Comment trực tiếp</h2><small id="commentVisibility">Luồng mới nhất từ TikTok LIVE</small></div><div><button id="manualQuestion" class="smallBtn">+ Thêm câu hỏi</button> <span id="commentCount" class="pill">0</span></div></div>
         <div id="comments" class="liveComments"></div>
+        <button id="loadMoreComments" class="smallBtn" hidden>Xem comment cũ hơn</button>
       </aside>
     </section>
   </main>
   <div id="toast" class="toast" role="status"><span id="toastMessage"></span><button id="toastAction" hidden>Hoàn tác</button></div>
   <div id="giftToasts" class="giftToasts" aria-live="polite" aria-relevant="additions text"></div>
+  <div id="welcomeToasts" class="welcomeToasts" aria-live="polite" aria-relevant="additions text"></div>
   <dialog id="targetModal" class="targetModal"><form id="targetForm" method="dialog">
     <div class="modalHead"><div><span class="eyebrow dark">THEO DÕI TIKTOK LIVE</span><h2>Đổi tài khoản</h2></div><button type="button" id="closeTarget" class="iconBtn" aria-label="Đóng">×</button></div>
     <label for="targetInput">TikTok ID</label><input id="targetInput" autocomplete="off" placeholder="@username hoặc URL TikTok LIVE"><small class="hint">Chỉ gồm chữ cái, chữ số, dấu chấm và dấu gạch dưới.</small>

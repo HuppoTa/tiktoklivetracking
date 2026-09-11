@@ -24,7 +24,7 @@ test("load tự phục hồi khi store.json corrupt và có backup hợp lệ", 
   const store = await storage.load();
   assert.equal(store.comments.length, 1);
   assert.equal(store.questionThreads.length, 1);
-  assert.equal(JSON.parse(await readFile(files.storeFile, "utf8")).schemaVersion, 7);
+  assert.equal(JSON.parse(await readFile(files.storeFile, "utf8")).schemaVersion, 8);
 });
 
 test("migration không mất comment, có backup và chạy lần hai không tạo trùng", async () => {
@@ -32,7 +32,7 @@ test("migration không mất comment, có backup và chạy lần hai không t�
   await writeFile(files.legacyFile, JSON.stringify(legacy));
   const first = new JsonStorage(files);
   await first.load();
-  assert.equal(first.store.schemaVersion, 7);
+  assert.equal(first.store.schemaVersion, 8);
   assert.equal(first.store.comments.length, 1);
   assert.equal(first.store.questionThreads.length, 1);
   assert.equal(JSON.parse(await readFile(`${files.legacyFile}.v1.backup.json`, "utf8")).length, 1);

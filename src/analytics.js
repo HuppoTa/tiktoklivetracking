@@ -12,6 +12,9 @@ export function createViewerState(value = {}) {
     memberJoinEvents: Number.isInteger(value.memberJoinEvents) && value.memberJoinEvents >= 0 ? value.memberJoinEvents : 0,
     joinedUserIds: [...new Set(joinedIds)],
     memberMessageIds: [...new Set(memberMessageIds)].slice(-5_000),
+    totalLikes: value.totalLikesSource === "like_event" && Number.isSafeInteger(value.totalLikes) && value.totalLikes >= 0 ? value.totalLikes : null,
+    totalLikesSource: value.totalLikesSource === "like_event" ? value.totalLikesSource : null,
+    lastLikeUpdateAt: typeof value.lastLikeUpdateAt === "string" ? value.lastLikeUpdateAt : null,
     lastViewerUpdateAt: typeof value.lastViewerUpdateAt === "string" ? value.lastViewerUpdateAt : null
   };
 }
@@ -22,6 +25,23 @@ export function extractViewerCount(data) {
     if (candidate === null || candidate === undefined || candidate === "") continue;
     const count = Number(candidate);
     if (Number.isInteger(count) && count >= 0) return count;
+  }
+  return null;
+}
+
+// TikTok emits the stream-wide total on LIKE events. Do not derive a total by
+// adding per-event counts: the connector documents that LIKE events may be omitted.
+export function extractTotalLikeCount(data) {
+  // Connector v2 protobuf emits `total`; older/simplified payloads use the
+  // documented totalLikeCount names. `count` remains intentionally excluded:
+  // it is only the increment for this particular LIKE event.
+  return firstSafeCount([data?.totalLikeCount, data?.total_like_count, data?.total]);
+}
+
+function firstSafeCount(candidates) {
+  for (const candidate of candidates) {
+    const count = Number(candidate);
+    if (Number.isSafeInteger(count) && count >= 0) return count;
   }
   return null;
 }
@@ -78,12 +98,27 @@ export class ViewerAnalytics {
     return { updated: true, duplicate: false };
   }
 
+  observeLike(data, now = new Date()) {
+    const totalLikes = extractTotalLikeCount(data);
+    if (totalLikes === null) return { updated: false, changed: false, delta: null };
+    const previous = this.state.totalLikes;
+    // A delayed or replayed event must not make the stream total go backwards.
+    if (previous !== null && totalLikes < previous) return { updated: false, changed: false, delta: null, stale: true };
+    this.state.totalLikes = totalLikes;
+    this.state.totalLikesSource = "like_event";
+    this.state.lastLikeUpdateAt = now.toISOString();
+    return { updated: true, changed: previous !== totalLikes, delta: previous === null ? null : totalLikes - previous };
+  }
+
   payload() {
     return {
       currentViewers: this.state.currentViewers,
       peakViewers: this.state.peakViewers,
       memberJoinEvents: this.state.memberJoinEvents,
       uniqueJoinedUsers: this.state.joinedUserIds.length,
+      totalLikes: this.state.totalLikes,
+      totalLikesSource: this.state.totalLikesSource,
+      lastLikeUpdateAt: this.state.lastLikeUpdateAt,
       lastViewerUpdateAt: this.state.lastViewerUpdateAt
     };
   }
@@ -115,6 +150,9 @@ export function buildAnalytics(threads, viewerState, gifts = [], attention = [])
       peak: viewers.peakViewers,
       memberJoinEvents: viewers.memberJoinEvents,
       uniqueJoinedUsers: viewers.joinedUserIds.length,
+      totalLikes: viewers.totalLikes,
+      totalLikesSource: viewers.totalLikesSource,
+      lastLikeUpdateAt: viewers.lastLikeUpdateAt,
       lastUpdatedAt: viewers.lastViewerUpdateAt,
       source: "tiktok-live-connector-observed"
     },gifts:{giftUsers:new Set(gifts.map(g=>g.userId)).size,giftEvents:gifts.length,giftQuantity:gifts.reduce((s,g)=>s+Number(g.repeatCount||0),0),knownDiamonds:gifts.filter(g=>g.valueKnown).reduce((s,g)=>s+Number(g.totalDiamonds||0),0),unknownValueGiftEvents:gifts.filter(g=>!g.valueKnown).length,giftUsersWaitingForQuestion:attention.filter(a=>a.attentionStatus==="waiting_question").length,giftQuestionsUnanswered:threads.filter(q=>q.giftPriority&&!q.answered).length,giftQuestionsAnswered:threads.filter(q=>q.giftSummary&&q.answered).length,giftAttentionUnacknowledged:attention.filter(a=>!a.acknowledged&&a.attentionStatus!=="linked").length}

@@ -84,6 +84,8 @@ export function mergeViewerUpdate(state, payload) {
       peak: Number.isFinite(payload.peakViewers) ? payload.peakViewers : viewers.peak ?? null,
       memberJoinEvents: Number.isInteger(payload.memberJoinEvents) ? payload.memberJoinEvents : viewers.memberJoinEvents || 0,
       uniqueJoinedUsers: Number.isInteger(payload.uniqueJoinedUsers) ? payload.uniqueJoinedUsers : viewers.uniqueJoinedUsers || 0,
+      totalLikes: Number.isSafeInteger(payload.totalLikes) && payload.totalLikes >= 0 ? payload.totalLikes : viewers.totalLikes ?? null,
+      lastLikeUpdateAt: payload.lastLikeUpdateAt || viewers.lastLikeUpdateAt || null,
       lastUpdatedAt: payload.lastViewerUpdateAt || viewers.lastUpdatedAt || null,
       source: "tiktok-live-connector-observed"
     }

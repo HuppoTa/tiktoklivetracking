@@ -5,7 +5,7 @@ import { DEFAULT_TARGET, recentTargets } from "./target.js";
 export function createSession(targetUsername, now = new Date(), id = `session-${randomUUID()}`, generation = 0) {
   return { id, targetUsername, roomId: null, status: "connecting", startedAt: now.toISOString(), connectedAt: null,
     collectorConnectedAt: null, endedAt: null, endReason: null, connectionGeneration: generation,
-    commentCount: 0, questionCount: 0, answeredCount: 0, nextQueueNumber: 1, viewerAnalytics: createViewerState() };
+    commentCount: 0, questionCount: 0, answeredCount: 0, nextQueueNumber: 1, welcomedUserIds: [], viewerAnalytics: createViewerState() };
 }
 
 export class SessionService {
@@ -66,7 +66,14 @@ export class SessionService {
   resetAnswers(id) {
     if (!this.get(id)) return null;
     const threads = this.store.questionThreads.filter(thread => thread.sessionId === id && thread.deleted !== true);
-    for (const thread of threads) { thread.answered = false; thread.answeredAt = null; }
+    for (const thread of threads) {
+      thread.answered = false; thread.answeredAt = null;
+      for (const item of thread.questionItems || []) {
+        if (item.status === "ANSWERED" || item.status === "SKIPPED") { item.status = "WAITING"; item.answeredAt = null; item.skippedAt = null; }
+      }
+      const active = (thread.questionItems || []).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))[0];
+      if (active) { for (const item of thread.questionItems) if (item.status === "ACTIVE") item.status = "WAITING"; active.status = "ACTIVE"; thread.activeQuestionId = active.id; }
+    }
     this.refreshSummary(id); return { session: this.get(id), updated: threads.length };
   }
   deleteSession(id) {

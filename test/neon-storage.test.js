@@ -13,7 +13,7 @@ test("NeonStorage initializes schema and persists the store through the SQL clie
   await storage.load();
 
   assert.equal(calls.length, 4);
-  assert.equal(storage.store.schemaVersion, 7);
+  assert.equal(storage.store.schemaVersion, 8);
   assert.equal(storage.readiness().ready, true);
   assert.equal(calls.filter(([query]) => typeof query === "string").length, 2);
 });

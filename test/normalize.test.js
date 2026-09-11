@@ -17,7 +17,8 @@ test("classifier loại greeting emoji và ngày sinh đơn lẻ", () => {
 });
 
 test("TikTok QUESTION_NEW luôn là question", () => {
-  assert.deepEqual(classifyQuestion("nội dung mẫu", { forced: true }), { question: true, score: 1, reasons: ["tiktok-question-event"] });
+  const result = classifyQuestion("nội dung mẫu", { forced: true });
+  assert.equal(result.question, true); assert.equal(result.score, 1); assert.deepEqual(result.reasons, ["tiktok-question-event"]);
 });
 
 test("nhận diện câu hỏi theo dấu hỏi và ngày sinh + chủ đề", () => {
@@ -25,4 +26,4 @@ test("nhận diện câu hỏi theo dấu hỏi và ngày sinh + chủ đề", (
   assert.equal(isQuestion("Nguyễn An 01/02/2000 tình cảm sắp tới"), true);
   assert.equal(isQuestion("Chào chị"), false);
 });
-test("classifier nhận alias tcam có DOB, person và future reasons",()=>{const r=classifyQuestion("Nguyễn Minh Anh 8/1/2010 chuyện tcam sắp tới ạ");assert.equal(r.question,true);assert.ok(r.score>=.8);for(const reason of ["topic:relationship_alias:tcam","contains-birth-date","contains-person-pattern","intent:future"])assert.ok(r.reasons.includes(reason));assert.equal(classifyQuestion("8/1/2010").question,false);assert.equal(classifyQuestion("tcam hay quá").question,false)});
+test("classifier chặn câu tình cảm có DOB under-18 và vẫn loại DOB đơn lẻ",()=>{const r=classifyQuestion("Nguyễn Minh Anh 8/1/2010 chuyện tcam sắp tới ạ");assert.equal(r.question,false);assert.ok(r.reasons.includes("blocked:underage-relationship"));assert.equal(classifyQuestion("8/1/2010").question,false);assert.equal(classifyQuestion("tcam hay quá").question,false)});

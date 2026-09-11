@@ -6,8 +6,15 @@ export class ConnectionGuard {
   schedule(generation, callback, delay) {
     if (!this.isCurrent(generation)) return false;
     this.clearReconnect();
-    this.reconnectTimer = setTimeout(() => { if (this.isCurrent(generation)) callback(); }, delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.isCurrent(generation)) callback();
+    }, delay);
     return true;
+  }
+  scheduleOnce(generation, callback, delay) {
+    if (!this.isCurrent(generation) || this.reconnectTimer) return false;
+    return this.schedule(generation, callback, delay);
   }
   clearReconnect() { if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
 }

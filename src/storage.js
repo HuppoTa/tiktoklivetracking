@@ -8,7 +8,7 @@ import { createViewerState } from "./analytics.js";
 import { DEFAULT_TARGET, normalizeTargetInput, recentTargets } from "./target.js";
 import { DEFAULT_GIFT_SETTINGS } from "./gift-service.js";
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 export const LEGACY_SESSION_ID = "legacy-session-v2";
 const defaultFs = { access, copyFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile };
 async function exists(path) { try { await access(path, constants.F_OK); return true; } catch { return false; } }
@@ -76,7 +76,7 @@ function normalizeSession(session) {
     startedAt: sessionIso(session.startedAt), connectedAt: sessionIso(session.connectedAt), collectorConnectedAt: sessionIso(session.collectorConnectedAt || session.connectedAt),
     endedAt: sessionIso(session.endedAt), endReason: session.endReason || null, connectionGeneration: Number(session.connectionGeneration || 0),
     commentCount: Number(session.commentCount || 0), questionCount: Number(session.questionCount || 0), answeredCount: Number(session.answeredCount || 0),
-    nextQueueNumber: Math.max(1, Number(session.nextQueueNumber) || 1),
+    nextQueueNumber: Math.max(1, Number(session.nextQueueNumber) || 1), welcomedUserIds: Array.isArray(session.welcomedUserIds) ? [...new Set(session.welcomedUserIds.map(String))].slice(-5_000) : [],
     viewerAnalytics: createViewerState(session.viewerAnalytics) };
 }
 
@@ -102,6 +102,9 @@ export function buildStore(comments = [], metadata = {}) {
       commentIds: Array.isArray(exact.commentIds) ? exact.commentIds : thread.commentIds, repeatCount: Number(exact.repeatCount || thread.repeatCount || 1),
       deleted: exact.deleted === true, possibleDuplicate: exact.possibleDuplicate || thread.possibleDuplicate });
   }
+  // Schema v8 persists per-question state.  Normalize old thread-only and
+  // early questionItems records before JsonStorage validates/saves the store.
+  for (const thread of store.questionThreads) service.syncThreadQuestionState(thread, new Date(thread.lastAskedAt || thread.createdAt || Date.now()));
   for (const session of sessions) {
     const scopedComments = store.comments.filter(comment => comment.sessionId === session.id);
     const scopedThreads = store.questionThreads.filter(thread => thread.sessionId === session.id && thread.deleted !== true);
@@ -162,7 +165,23 @@ export class JsonStorage {
     const unique = (rows, label, key = item => item.id) => { const seen = new Set(); for (const row of rows) { const value = key(row); if (!value || seen.has(value)) errors.push(`${label}_DUPLICATE_OR_MISSING`); seen.add(value); } };
     unique(comments, "COMMENT", item => `${item.sessionId}:${item.id}`); unique(threads, "THREAD"); unique(threads, "QUEUE", item => `${item.sessionId}:${item.queueNumber}`);
     const sessionIds = new Set(sessions.map(item => item.id)), commentIds = new Set(comments.map(item => `${item.sessionId}:${item.id}`));
-    for (const thread of threads) { if (!sessionIds.has(thread.sessionId)) errors.push("THREAD_SESSION_MISSING"); if (thread.answered !== true && thread.answeredAt != null) errors.push("ANSWERED_AT_INCONSISTENT"); for (const id of thread.commentIds || []) if (!commentIds.has(`${thread.sessionId}:${id}`)) errors.push("OCCURRENCE_MISSING"); }
+    for (const thread of threads) {
+      if (!sessionIds.has(thread.sessionId)) errors.push("THREAD_SESSION_MISSING"); if (thread.answered !== true && thread.answeredAt != null) errors.push("ANSWERED_AT_INCONSISTENT");
+      for (const id of thread.commentIds || []) if (!commentIds.has(`${thread.sessionId}:${id}`)) errors.push("OCCURRENCE_MISSING");
+      if (thread.questionItems !== undefined) {
+        if (!Array.isArray(thread.questionItems) || !thread.questionItems.length) errors.push("QUESTION_ITEMS_INVALID");
+        else {
+          const itemIds = new Set(); let activeCount = 0;
+          for (const item of thread.questionItems) {
+            if (!item?.id || itemIds.has(item.id)) errors.push("QUESTION_ITEM_DUPLICATE_OR_MISSING"); itemIds.add(item?.id);
+            if (!["WAITING","ACTIVE","ANSWERED","SKIPPED","NEEDS_REVIEW"].includes(item?.status)) errors.push("QUESTION_ITEM_STATUS_INVALID");
+            if (item?.status === "ACTIVE") activeCount += 1;
+            for (const id of item?.commentIds || []) if (!commentIds.has(`${thread.sessionId}:${id}`)) errors.push("QUESTION_ITEM_OCCURRENCE_MISSING");
+          }
+          if (activeCount > 1) errors.push("QUESTION_ITEM_MULTIPLE_ACTIVE");
+        }
+      }
+    }
     for (const session of sessions) { const max = Math.max(0, ...threads.filter(item => item.sessionId === session.id).map(item => Number(item.queueNumber) || 0)); if (Number(session.nextQueueNumber) <= max) errors.push("NEXT_QUEUE_INVALID"); }
     const giftIds=new Set();for(const gift of candidate.gifts||[]){const key=`${gift.sessionId}:${gift.id}`;if(giftIds.has(key))errors.push("GIFT_DUPLICATE");giftIds.add(key);if(!sessionIds.has(gift.sessionId))errors.push("GIFT_SESSION_MISSING");if(!gift.id||!gift.userId||!gift.giftId)errors.push("GIFT_REQUIRED_FIELD_MISSING");if(!Number.isSafeInteger(Number(gift.repeatCount))||Number(gift.repeatCount)<1||!([null].includes(gift.totalDiamonds)||Number.isFinite(Number(gift.totalDiamonds))))errors.push("GIFT_VALUE_INVALID");}
     for(const a of candidate.giftAttention||[]){if(!sessionIds.has(a.sessionId))errors.push("GIFT_ATTENTION_SESSION_MISSING");if(a.linkedQuestionId){const q=threads.find(q=>q.id===a.linkedQuestionId);if(!q||q.sessionId!==a.sessionId||q.userId!==a.userId)errors.push("GIFT_LINK_INVALID")}}

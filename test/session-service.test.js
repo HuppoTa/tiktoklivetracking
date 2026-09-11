@@ -27,6 +27,15 @@ test("A → B → C chỉ generation C hợp lệ và timer A bị hủy", async
   await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(called, false);
 });
 
+test("scheduleOnce không dời reconnect khi nhiều lỗi cùng generation", async () => {
+  const guard = new ConnectionGuard(); const generation = guard.next(); let calls = 0;
+  assert.equal(guard.scheduleOnce(generation, () => { calls += 1; }, 5), true);
+  assert.equal(guard.scheduleOnce(generation, () => { calls += 1; }, 5), false);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls, 1);
+  assert.equal(guard.reconnectTimer, null);
+});
+
 test("event muộn và viewer cũ bị guard từ chối", () => {
   const guard = new ConnectionGuard(); const old = guard.next(); guard.next();
   assert.equal(guard.isCurrent(old), false);

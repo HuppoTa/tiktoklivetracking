@@ -5,18 +5,33 @@ import {
 } from "./dashboard-state.js";
 import { normalizeTargetInput } from "./target-input.js";
 import { addGiftNotification, clearGiftNotifications, createGiftNotificationStore, dismissGiftNotification } from "./gift-notifications.js";
+import { addWelcome, clearWelcomeStore, createWelcomeStore, takeWelcomeBurst, WELCOME_GAP_MS, WELCOME_VISIBLE_MS } from "./welcome-notifications.js";
 
 const API_BASE = String(globalThis.__APP_CONFIG__?.apiBaseUrl || "").replace(/\/$/, "");
 const SOCKET_URL = String(globalThis.__APP_CONFIG__?.socketUrl || API_BASE || "").replace(/\/$/, "");
 const TOKEN_KEY = "live-comment-hub-auth-token";
+const WELCOME_DEBUG = ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
 let authToken = sessionStorage.getItem(TOKEN_KEY) || "";
 const socket = io(SOCKET_URL || undefined, { autoConnect: false, auth: callback => callback({ token: authToken }) });
 let state = initialDashboardState();
+const COMMENT_PAGE_SIZE = 100;
+let visibleCommentCount = COMMENT_PAGE_SIZE;
+let dashboardLoaded = false;
+let dashboardSyncInFlight = null;
+let collectorActionInFlight = false;
+const pendingLiveComments = new Map();
+const pendingQueueThreadIds = new Set();
+let livePatchFrame = null;
+let queuePatchFrame = null;
+let statsPatchFrame = null;
 const pendingThreads = new Set();
 const pendingUsers = new Set();
 const giftNotifications=createGiftNotificationStore({maxVisible:4}),giftNotificationTimers=new Map(),giftHighlights=new Map();
 let giftRefreshTimer = null;
 const pendingGiftHighlights = new Set();
+const welcomeNotifications = createWelcomeStore();
+let activeWelcome = null, welcomeVisibleTimer = null, welcomeGapTimer = null;
+let likePulseTimer = null;
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 
@@ -54,30 +69,40 @@ function questionCard(thread) {
   if (!thread || typeof thread.id !== "string") return "";
   const occurrences = Array.isArray(thread.occurrences) ? thread.occurrences.filter(Boolean) : [];
   const pending = pendingThreads.has(thread.id);
-  const completedDetails = thread.answered ? `<div class="completedDetails"><span>Hỏi lần đầu <b>${formatTime(thread.createdAt)}</b></span><span>Hỏi gần nhất <b>${formatTime(thread.lastAskedAt)}</b></span><span>Trả bài <b>${formatTime(thread.answeredAt)}</b></span><span>Thời gian chờ <b>${formatDuration(waitSeconds(thread))}</b></span></div>` : "";
+  const questionItems = Array.isArray(thread.questionItems) ? thread.questionItems : [];
+  const active = thread.activeQuestion || questionItems.find(item => ["ACTIVE", "WAITING", "NEEDS_REVIEW"].includes(item.status)) || null;
+  const waiting = questionItems.filter(item => item.id !== active?.id && ["ACTIVE", "WAITING", "NEEDS_REVIEW"].includes(item.status));
+  const completed = questionItems.filter(item => ["ANSWERED", "SKIPPED"].includes(item.status));
+  const activeRepeat = Number(active?.repeatCount || 1);
+  const leader = !thread.answered && thread._queueLeader === true;
+  const activeContent = active ? `<section class="activeQuestion ${leader ? "queueLeader" : ""} ${active.needsReview || active.status === "NEEDS_REVIEW" ? "needsReview" : ""}">
+    <div class="activeLabel">✦ CÂU CẦN ĐỌC TIẾP</div>
+    <p>${esc(active.text || active.rawText || "Nội dung không khả dụng")}</p>
+    <small>${formatTime(active.createdAt)}${activeRepeat > 1 ? ` · Đã hỏi lại ${activeRepeat} lần` : ""}${active.needsReview || active.status === "NEEDS_REVIEW" ? " · ⚠ Cần kiểm tra" : ""}</small>
+    <div class="activeActions"><button class="answerActive" data-answer-item="${esc(active.id)}" data-thread="${esc(thread.id)}" ${pending ? "disabled" : ""}>Đã trả câu này</button><button class="skipActive" data-skip-item="${esc(active.id)}" data-thread="${esc(thread.id)}" ${pending ? "disabled" : ""}>Bỏ qua</button></div>
+  </section>` : `<section class="activeQuestion complete"><div class="activeLabel">✓ ĐÃ TRẢ BÀI</div><p>Không còn câu nào cần đọc trong hàng chờ.</p></section>`;
   return `<article class="questionCard ${thread.answered ? "answered" : ""} ${pending ? "isLoading" : ""}" data-thread-id="${esc(thread.id)}">
-    <label class="answerCheck" title="${thread.answered ? "Hoàn tác" : "Đánh dấu đã trả bài"}"><input type="checkbox" data-answer-thread="${esc(thread.id)}" ${thread.answered ? "checked" : ""} ${pending ? "disabled" : ""}><span></span></label>
     <div class="questionBody">
       <div class="personRow">${avatar(thread)}<div><b>${esc(thread.nickname || "Không rõ")}</b><small>@${esc(thread.username || "unknown")}</small></div><time>${formatTime(thread.lastAskedAt)}</time></div>
-      <p class="questionText">${esc(thread.canonicalText || "Nội dung không khả dụng")}</p>
+      ${activeContent}
+      ${waiting.length ? `<details class="history questionList"><summary>CÒN ${waiting.length} CÂU TIẾP THEO</summary>${waiting.map(item => `<div><time>${formatTime(item.createdAt)}</time><p>${esc(item.text || item.rawText || "")}${item.repeatCount > 1 ? ` · Đã hỏi lại ${item.repeatCount} lần` : ""}</p><small>${item.needsReview || item.status === "NEEDS_REVIEW" ? "⚠ Cần kiểm tra" : "Đang chờ"}</small></div>`).join("")}</details>` : ""}
+      ${completed.length ? `<details class="history questionList"><summary>ĐÃ XỬ LÝ ${completed.length} CÂU</summary>${completed.map(item => `<div><time>${formatTime(item.answeredAt || item.skippedAt || item.updatedAt)}</time><p>${esc(item.text || item.rawText || "")}</p><button class="inlineUndo" data-undo-item="${esc(item.id)}" data-thread="${esc(thread.id)}" ${pending ? "disabled" : ""}>${item.status === "SKIPPED" ? "Hoàn tác bỏ qua" : "Hoàn tác trả lời"}</button></div>`).join("")}</details>` : ""}
       <div class="meta">
         <span class="pill queueNumber">#${Number(thread.queueNumber) || "—"}</span>
         <span class="pill">${thread.source === "manual_entry" ? "Nhập tay" : thread.source === "promoted_comment" ? "Nâng từ comment" : "Tự động"}</span>
         ${thread.giftSummary?`<span class="pill repeat">🎁 ${esc(thread.giftSummary.lastGiftName)} ×${thread.giftSummary.lastGiftQuantity}${thread.giftSummary.valueKnown?` · ${thread.giftSummary.totalDiamonds} 💎`:""}</span>`:""}
         ${thread.manualPinned?'<span class="pill repeat">📌 Đã ghim</span>':""}
-        ${(thread.repeatCount || 1) > 1 ? `<span class="pill repeat">Lặp ${Number(thread.repeatCount) || 1} lần</span>` : ""}
-        <span class="pill">Người này có ${userThreadCount(thread.userId)} câu hỏi</span>
+        <span class="pill">${questionItems.length} câu hỏi · ${completed.filter(item => item.status === "ANSWERED").length} đã trả · ${waiting.length + (active ? 1 : 0)} đang chờ</span>
         ${thread.possibleDuplicate ? '<span class="pill possible">Có thể trùng</span>' : ""}
         ${thread.needsReview ? '<span class="pill possible">Cần kiểm tra</span>' : ""}
         ${thread.detectedTopic ? `<span class="pill">${esc(thread.detectedTopic)}</span>` : ""}
         ${Number.isFinite(thread.confidenceScore) ? `<span class="pill">${Math.round(thread.confidenceScore * 100)}%</span>` : ""}
         ${thread.contextMerged ? '<span class="pill repeat">Ghép nhiều comment</span>' : ""}
         ${state.settings?.questionDebug ? `<span class="pill possible">Score ${Number(thread.occurrences?.at(-1)?.questionScore || 0).toFixed(2)} · ${esc((thread.occurrences?.at(-1)?.questionReasons || []).join(", "))}</span>` : ""}
-        ${thread.answered ? `<button class="inlineUndo" data-undo-thread="${esc(thread.id)}" ${pending ? "disabled" : ""}>Hoàn tác</button>` : ""}
+        ${thread.answered ? `<button class="inlineUndo" data-undo-thread="${esc(thread.id)}" ${pending ? "disabled" : ""}>Hoàn tác tất cả</button>` : ""}
         ${["manual_entry","promoted_comment"].includes(thread.source) ? `<button class="inlineUndo" data-archive-thread="${esc(thread.id)}">Ẩn khỏi hàng đợi</button>` : ""}
         ${!thread.answered ? `<span class="priorityControls"><button class="priorityBtn" data-pin-thread="${esc(thread.id)}" data-pinned="${thread.manualPinned?'false':'true'}">${thread.manualPinned?'Bỏ ghim':'Ghim'}</button><button class="priorityBtn" data-priority="move_to_top" data-thread="${esc(thread.id)}">Lên đầu</button><button class="priorityBtn" data-priority="move_up" data-thread="${esc(thread.id)}">↑</button><button class="priorityBtn" data-priority="move_down" data-thread="${esc(thread.id)}">↓</button></span>` : ""}
       </div>
-      ${completedDetails}
       <details class="history"><summary>Xem ${occurrences.length} lượt gửi gốc</summary>${occurrences.map(item => `<div><time>${formatTime(item.timestamp)}</time><p>${esc(item.text || "")}</p></div>`).join("")}</details>
     </div>
   </article>`;
@@ -124,13 +149,92 @@ function renderQueue() {
     html = selectQuestions(state, {
       answered: state.tab === "answered", search: $("search").value,
       sort: $("sort").value, minutes: Number($("timeRange").value) || 0
-    }).filter(thread => state.tab !== "review" || thread.needsReview === true).map(safeQuestionCard).join("");
+    }).filter(thread => state.tab !== "review" || thread.needsReview === true).map((thread, index) => safeQuestionCard({ ...thread, _queueLeader: index === 0 })).join("");
   }
   if (!html) {
     const empty = emptyStateFor(state.tab);
     html = `<div class="empty"><b>${esc(empty.title)}</b><span>${esc(empty.detail)}</span></div>`;
   }
   $("queue").innerHTML = html;
+}
+
+function activeQueueThreads() {
+  return selectQuestions(state, {
+    answered: state.tab === "answered", search: $("search").value,
+    sort: $("sort").value, minutes: Number($("timeRange").value) || 0
+  }).filter(thread => state.tab !== "review" || thread.needsReview === true);
+}
+
+function cardFromHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = html.trim();
+  return template.content.firstElementChild;
+}
+
+function patchQueueThread(threadId) {
+  if (!["unanswered", "answered", "review"].includes(state.tab)) return false;
+  const root = $("queue");
+  const expected = activeQueueThreads();
+  const thread = expected.find(item => item.id === threadId);
+  const selector = `[data-thread-id="${CSS.escape(threadId)}"]`;
+  const existing = root.querySelector(selector);
+  if (!thread) { existing?.remove(); return expected.length > 0; }
+  const index = expected.findIndex(item => item.id === threadId);
+  const card = cardFromHtml(safeQuestionCard({ ...thread, _queueLeader: index === 0 }));
+  if (existing) existing.replaceWith(card);
+  const previous = expected.slice(0, index).reverse().map(item => root.querySelector(`[data-thread-id="${CSS.escape(item.id)}"]`)).find(Boolean);
+  if (previous) previous.insertAdjacentElement("afterend", card);
+  else { root.querySelector(".empty")?.remove(); root.prepend(card); }
+  return true;
+}
+
+function scheduleQueuePatch(threadIds) {
+  for (const id of threadIds || []) if (id) pendingQueueThreadIds.add(id);
+  if (queuePatchFrame) return;
+  queuePatchFrame = requestAnimationFrame(() => {
+    queuePatchFrame = null;
+    const ids = [...pendingQueueThreadIds]; pendingQueueThreadIds.clear();
+    if (!ids.length || !ids.every(patchQueueThread)) renderQueue();
+  });
+}
+
+function commentCard(comment, linked) {
+  const gift = (state.giftAttention || []).find(item => item.userId === comment.userId);
+  return `<article class="liveComment" data-comment-id="${esc(comment.id)}" data-comment-user="${esc(comment.userId)}">${avatar(comment)}<div><div><b>${esc(comment.nickname || "Không rõ")}</b><time>${formatTime(comment.timestamp)}</time></div><p>${esc(comment.text || "")}</p>${gift ? `<span class="pill repeat">🎁 Đã tặng ${esc(gift.lastGiftName)} ×${gift.lastGiftQuantity}</span>` : ""}${linked.has(comment.id) ? '<span class="pill">Đã có trong hàng đợi</span>' : `<button class="commentAction" data-promote-comment="${esc(comment.id)}">Thêm vào câu hỏi</button>`}</div></article>`;
+}
+
+function updateCommentVisibility() {
+  const comments = Array.isArray(state.comments) ? state.comments : [];
+  const visible = comments.slice(-visibleCommentCount);
+  $("commentVisibility").textContent = comments.length > visible.length ? `Đang xem ${visible.length}/${comments.length} comment mới nhất` : `${comments.length} comment trong phiên`;
+  $("loadMoreComments").hidden = visible.length >= comments.length;
+}
+
+function scheduleLiveCommentPatch(comment) {
+  if (!comment?.id) return;
+  pendingLiveComments.set(comment.id, comment);
+  if (livePatchFrame) return;
+  livePatchFrame = requestAnimationFrame(() => {
+    livePatchFrame = null;
+    const root = $("comments");
+    const linked = new Set(allQuestions().flatMap(item => item.commentIds || []));
+    for (const item of pendingLiveComments.values()) {
+      if (!acceptsSessionEvent(state, item)) continue;
+      const selector = `[data-comment-id="${CSS.escape(item.id)}"]`;
+      const existing = root.querySelector(selector);
+      const card = cardFromHtml(commentCard(item, linked));
+      if (existing) existing.replaceWith(card);
+      else { root.querySelector(".empty")?.remove(); root.prepend(card); }
+    }
+    pendingLiveComments.clear();
+    while (root.children.length > Math.min(visibleCommentCount, state.comments.length)) root.lastElementChild?.remove();
+    updateCommentVisibility();
+  });
+}
+
+function scheduleStatsPatch() {
+  if (statsPatchFrame) return;
+  statsPatchFrame = requestAnimationFrame(() => { statsPatchFrame = null; renderStats(); });
 }
 
 function questionMetrics() {
@@ -155,10 +259,27 @@ function renderStats() {
   $("unansweredBadge").textContent = metrics.unanswered;
   $("memberJoinEvents").textContent = Number(viewers.memberJoinEvents || 0).toLocaleString("vi-VN");
   $("uniqueJoinedUsers").textContent = Number(viewers.uniqueJoinedUsers || 0).toLocaleString("vi-VN");
+  $("totalLikes").textContent = Number.isSafeInteger(viewers.totalLikes) ? viewers.totalLikes.toLocaleString("vi-VN") : "—";
   $("averageWait").textContent = formatDuration(metrics.averageWaitSeconds);
   $("commentCount").textContent = Array.isArray(state.comments) ? state.comments.length : 0;
   $("giftBadge").textContent=(state.giftAttention||[]).filter(a=>!a.acknowledged).length;
   renderViewerFreshness();
+}
+
+function notifyLike(payload) {
+  if (!acceptsSessionEvent(state, payload)) return;
+  mergeViewerUpdate(state, { totalLikes: payload.totalLikes, lastLikeUpdateAt: payload.receivedAt });
+  renderStats();
+  const delta = Number.isSafeInteger(payload.totalDelta) && payload.totalDelta > 0 ? payload.totalDelta : payload.eventCount;
+  if (!Number.isSafeInteger(delta) || delta <= 0) return;
+  const pulse = $("likePulse");
+  pulse.textContent = `+${delta.toLocaleString("vi-VN")}`;
+  pulse.hidden = false;
+  pulse.classList.remove("active");
+  void pulse.offsetWidth;
+  pulse.classList.add("active");
+  clearTimeout(likePulseTimer);
+  likePulseTimer = setTimeout(() => { pulse.hidden = true; pulse.classList.remove("active"); }, 1400);
 }
 
 function renderViewerFreshness() {
@@ -173,7 +294,9 @@ function renderViewerFreshness() {
 function renderComments() {
   const comments = Array.isArray(state.comments) ? state.comments : [];
   const linked = new Set(allQuestions().flatMap(item => item.commentIds || []));
-  $("comments").innerHTML = comments.slice(-60).reverse().map(comment => {const gift=(state.giftAttention||[]).find(a=>a.userId===comment.userId);return `<article class="liveComment" data-comment-user="${esc(comment.userId)}">${avatar(comment)}<div><div><b>${esc(comment.nickname || "Không rõ")}</b><time>${formatTime(comment.timestamp)}</time></div><p>${esc(comment.text || "")}</p>${gift?`<span class="pill repeat">🎁 Đã tặng ${esc(gift.lastGiftName)} ×${gift.lastGiftQuantity}</span>`:""}${linked.has(comment.id) ? '<span class="pill">Đã có trong hàng đợi</span>' : `<button class="commentAction" data-promote-comment="${esc(comment.id)}">Thêm vào câu hỏi</button>`}</div></article>`}).join("") || '<div class="empty"><b>Chưa có comment</b></div>';
+  const visible = comments.slice(-visibleCommentCount);
+  $("comments").innerHTML = visible.reverse().map(comment => commentCard(comment, linked)).join("") || '<div class="empty"><b>Chưa có comment</b></div>';
+  updateCommentVisibility();
 }
 
 function renderStatus() {
@@ -183,10 +306,10 @@ function renderStatus() {
   const connectionState = state.status?.state || "idle";
   badge.className = `badge ${connectionState}`;
   badge.innerHTML = `<i></i> ${connectionState === "live" ? "ĐANG LIVE" : connectionState === "connecting" ? "KẾT NỐI" : "OFFLINE"}`;
-  $("toggle").textContent = ["live", "connecting"].includes(connectionState) ? "Dừng thu" : "Bắt đầu thu"; $("toggle").disabled = historical;
+  $("toggle").textContent = ["live", "connecting"].includes(connectionState) ? "Dừng thu" : "Bắt đầu thu"; $("toggle").disabled = historical || collectorActionInFlight;
   $("headerTarget").textContent = state.target?.displayUsername || `@${state.status?.username || "kathyuyen.ta"}`;
   $("changeTarget").disabled = connectionState === "switching";
-  $("retry").hidden = connectionState !== "offline";
+  $("retry").hidden = connectionState !== "offline"; $("retry").disabled = collectorActionInFlight;
 }
 
 function renderSessions() {
@@ -222,6 +345,10 @@ function giftToastContent(item){const p=item.payload,g=p.gift,detail=p.questionI
 function renderGiftNotifications(){const root=$("giftToasts"),existing=new Map([...root.children].map(node=>[node.dataset.giftToast,node])),wanted=new Set();for(const item of giftNotifications.items){wanted.add(item.key);let node=existing.get(item.key);if(!node){node=document.createElement("article");node.className="giftToast";node.dataset.giftToast=item.key;root.append(node)}node.dataset.question=item.payload.questionId||"";node.innerHTML=giftToastContent(item)}for(const [key,node] of existing)if(!wanted.has(key))node.remove()}
 function removeGiftToast(key){clearTimeout(giftNotificationTimers.get(key));giftNotificationTimers.delete(key);dismissGiftNotification(giftNotifications,key);renderGiftNotifications()}
 function notifyGift(payload){if(state.giftSettings?.enabled===false||!acceptsSessionEvent(state,payload)||!addGiftNotification(giftNotifications,payload))return;const item=giftNotifications.items.find(x=>x.payload.eventId===payload.eventId||x.key.endsWith(`:${payload.gift.giftId||payload.gift.giftName}`));if(!item)return;clearTimeout(giftNotificationTimers.get(item.key));giftNotificationTimers.set(item.key,setTimeout(()=>removeGiftToast(item.key),Number(state.giftSettings?.notificationSeconds||4)*1000));renderGiftNotifications();if(payload.questionId)highlightThread(payload.questionId)}
+function renderWelcomeNotification(){const root=$("welcomeToasts");if(!activeWelcome){root.replaceChildren();return}const names=activeWelcome.names.map(esc),title=activeWelcome.extraCount?`${names.join(", ")} và ${activeWelcome.extraCount} người khác vừa tham gia`:`${names.join(", ")} vừa tham gia`;root.innerHTML=`<article class="welcomeToast ${activeWelcome.hasGift?"hasGift":""}"><span class="welcomeIcon">${activeWelcome.hasGift?"🎁":"👋"}</span><div><small>VỪA THAM GIA</small><b>${title}</b><p>Chào mừng bạn đến với LIVE ✨</p>${activeWelcome.hasQuestion?'<em>Đã có câu hỏi trong hàng đợi</em>':""}${activeWelcome.hasGift?'<em class="gift">Đã gửi quà</em>':""}</div></article>`;if(WELCOME_DEBUG)console.debug("[welcome] rendered",{names:activeWelcome.names,extraCount:activeWelcome.extraCount})}
+function showNextWelcome(){if(activeWelcome)return;activeWelcome=takeWelcomeBurst(welcomeNotifications);if(!activeWelcome)return;renderWelcomeNotification();clearTimeout(welcomeVisibleTimer);welcomeVisibleTimer=setTimeout(()=>{activeWelcome=null;renderWelcomeNotification();if(WELCOME_DEBUG)console.debug("[welcome] dismissed");clearTimeout(welcomeGapTimer);welcomeGapTimer=setTimeout(showNextWelcome,WELCOME_GAP_MS)},WELCOME_VISIBLE_MS)}
+function notifyWelcome(payload){if(WELCOME_DEBUG)console.debug("[welcome] socket received",{sessionId:payload?.sessionId,userId:payload?.userId,displayName:payload?.displayName});if(!acceptsSessionEvent(state,payload)||!addWelcome(welcomeNotifications,payload))return;if(WELCOME_DEBUG)console.debug("[welcome] queued",{sessionId:payload.sessionId,userId:payload.userId});showNextWelcome()}
+function clearWelcomeNotifications(){clearTimeout(welcomeVisibleTimer);clearTimeout(welcomeGapTimer);activeWelcome=null;clearWelcomeStore(welcomeNotifications);renderWelcomeNotification()}
 function scheduleGiftStateRefresh(payload){if(payload?.questionId)pendingGiftHighlights.add(payload.questionId);if(giftRefreshTimer)return;giftRefreshTimer=setTimeout(async()=>{giftRefreshTimer=null;const selectedId=state.selectedSession?.id,highlights=[...pendingGiftHighlights];pendingGiftHighlights.clear();if(!selectedId)return;try{const data=await requestJson(`/api/state?sessionId=${encodeURIComponent(selectedId)}`);if(state.selectedSession?.id!==selectedId)return;state=normalizeDashboardPayload(data,state);render();for(const id of highlights)highlightThread(id)}catch(error){reportError(error,"Không đồng bộ được gift")}},75)}
 $('giftToasts').addEventListener('click',event=>{const close=event.target.closest('[data-dismiss-gift]');if(close){event.stopPropagation();removeGiftToast(close.dataset.dismissGift);return}const card=event.target.closest('[data-gift-toast]');if(!card)return;if(card.dataset.question)focusThread(card.dataset.question);else{state.tab='gifts';document.querySelectorAll('.tab').forEach(item=>item.classList.toggle('active',item.dataset.tab==='gifts'));updateSortOptions();renderQueue()}});
 
@@ -265,6 +392,16 @@ async function requestJson(url, options = {}, allowAuthPrompt = true) {
   return data;
 }
 
+function syncDashboardState() {
+  if (dashboardSyncInFlight) return dashboardSyncInFlight;
+  const selectedSessionId = state.selectedSession?.id;
+  const path = selectedSessionId ? `/api/state?sessionId=${encodeURIComponent(selectedSessionId)}` : "/api/state";
+  dashboardSyncInFlight = requestJson(path)
+    .then(data => { state = normalizeDashboardPayload(data, state); visibleCommentCount = Math.max(visibleCommentCount, COMMENT_PAGE_SIZE); render(); })
+    .finally(() => { dashboardSyncInFlight = null; });
+  return dashboardSyncInFlight;
+}
+
 async function updateThreadAnswered(id, answered, { showFeedback = true } = {}) {
   if (!id || pendingThreads.has(id)) return false;
   const snapshot = snapshotQuestion(state, id);
@@ -295,6 +432,21 @@ async function updateThreadAnswered(id, answered, { showFeedback = true } = {}) 
   }
 }
 
+async function updateQuestionItemStatus(threadId, itemId, status) {
+  if (!threadId || !itemId || pendingThreads.has(threadId)) return false;
+  pendingThreads.add(threadId); renderQueue();
+  try {
+    const payload = await requestJson(`/api/questions/${encodeURIComponent(threadId)}/items/${encodeURIComponent(itemId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, sessionId: state.selectedSession?.id })
+    });
+    mergeQuestionUpdate(state, payload); clearError();
+    toast(status === "ANSWERED" ? "Đã trả câu này" : status === "SKIPPED" ? "Đã bỏ qua câu này" : "Câu hỏi đã trở lại hàng chờ");
+    return true;
+  } catch (error) {
+    reportError(error, `Không cập nhật được câu hỏi: ${error.message}`); toast(`Không thể cập nhật: ${error.message}`); return false;
+  } finally { pendingThreads.delete(threadId); renderStats(); renderQueue(); }
+}
+
 async function updateUserAnswered(userId, answered) {
   if (!userId || pendingUsers.has(userId)) return;
   const action = answered ? "đánh dấu tất cả đã trả" : "hoàn tác tất cả";
@@ -317,6 +469,12 @@ $("queue").addEventListener("change", event => {
   if (id) void updateThreadAnswered(id, Boolean(event.target.checked));
 });
 $("queue").addEventListener("click", event => {
+  const answerItem = event.target.closest?.("[data-answer-item]");
+  if (answerItem) { void updateQuestionItemStatus(answerItem.dataset.thread, answerItem.dataset.answerItem, "ANSWERED"); return; }
+  const skipItem = event.target.closest?.("[data-skip-item]");
+  if (skipItem) { void updateQuestionItemStatus(skipItem.dataset.thread, skipItem.dataset.skipItem, "SKIPPED"); return; }
+  const undoItem = event.target.closest?.("[data-undo-item]");
+  if (undoItem) { void updateQuestionItemStatus(undoItem.dataset.thread, undoItem.dataset.undoItem, "WAITING"); return; }
   const undo = event.target.closest?.("[data-undo-thread]");
   if (undo) { void updateThreadAnswered(undo.dataset.undoThread, false); return; }
   const button = event.target.closest?.("[data-answer-user]");
@@ -334,6 +492,7 @@ $("queue").addEventListener("click", event => {
 $("comments").addEventListener("click", event => { const button = event.target.closest?.("[data-promote-comment]"); if (!button) return;
   button.disabled = true; void requestJson(`/api/comments/${encodeURIComponent(button.dataset.promoteComment)}/promote-question`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({sessionId:state.selectedSession?.id}) })
     .then(payload => { mergeQuestionUpdate(state,payload); render(); toast(`Đã thêm câu #${payload.queueNumber} vào hàng đợi`); }).catch(error => reportError(error,error.message)).finally(() => { button.disabled=false; }); });
+$("loadMoreComments").addEventListener("click", () => { visibleCommentCount += COMMENT_PAGE_SIZE; renderComments(); });
 
 function openManualModal(){ $("manualUser").innerHTML='<option value="">Khách chưa xác định</option>'+allUsers().map(user=>`<option value="${esc(user.userId)}">${esc(user.nickname)} (@${esc(user.username)})</option>`).join(""); $("manualText").value=""; $("manualReason").value=""; $("manualError").hidden=true; $("manualModal").showModal(); }
 $("manualQuestion").addEventListener("click",openManualModal); for(const id of ["closeManual","cancelManual"]) $(id).addEventListener("click",()=>$("manualModal").close());
@@ -348,8 +507,20 @@ document.querySelectorAll(".tab").forEach(button => button.addEventListener("cli
 $("search").addEventListener("input", renderQueue);
 $("sort").addEventListener("change", renderQueue);
 $("timeRange").addEventListener("change", renderQueue);
-$("toggle").addEventListener("click", () => fetch(["live", "connecting"].includes(state.status?.state) ? "/api/disconnect" : "/api/connect", { method: "POST" }).catch(error => reportError(error, "Không đổi được trạng thái collector")));
-$("retry").addEventListener("click", () => fetch("/api/connect", { method: "POST" }).catch(error => reportError(error, "Không thể thử lại")));
+async function runCollectorAction(path, fallbackMessage) {
+  if (collectorActionInFlight) return;
+  collectorActionInFlight = true; renderStatus(); clearError();
+  try {
+    await requestJson(path, { method: "POST" });
+    await syncDashboardState();
+  } catch (error) {
+    reportError(error, error.message || fallbackMessage);
+  } finally {
+    collectorActionInFlight = false; renderStatus();
+  }
+}
+$("toggle").addEventListener("click", () => void runCollectorAction(["live", "connecting"].includes(state.status?.state) ? "/api/disconnect" : "/api/connect", "Không đổi được trạng thái collector"));
+$("retry").addEventListener("click", () => void runCollectorAction("/api/collector/reconnect", "Không thể thử lại"));
 
 function renderRecentTargets() {
   const recent = Array.isArray(state.settings?.recentTargets) ? state.settings.recentTargets : [];
@@ -441,7 +612,8 @@ window.addEventListener("error", event => reportError(event.error || new Error(e
 window.addEventListener("unhandledrejection", event => reportError(event.reason, "Một thao tác chưa hoàn tất. Vui lòng thử lại."));
 
 updateSortOptions();
-requestJson("/api/state").then(data => { state = normalizeDashboardPayload(data, state); render(); socket.connect(); }).catch(error => reportError(error, "Không tải được dữ liệu dashboard"));
+syncDashboardState().then(() => { dashboardLoaded = true; socket.connect(); }).catch(error => reportError(error, "Không tải được dữ liệu dashboard"));
+socket.on("connect", () => { if (dashboardLoaded) void syncDashboardState().catch(error => reportError(error, "Đã kết nối lại nhưng chưa đồng bộ được comment mới")); });
 socket.on("connect_error", error => {
   if (String(error?.message || "").includes("UNAUTHORIZED")) {
     authToken = ""; sessionStorage.removeItem(TOKEN_KEY); socket.disconnect();
@@ -449,12 +621,14 @@ socket.on("connect_error", error => {
   }
 });
 socket.on("status", value => { if (value && typeof value === "object") state.status = { ...state.status, ...value }; renderStatus(); });
-socket.on("comment", comment => { if (!acceptsSessionEvent(state, comment)) return; if (comment?.id && !(state.comments || []).some(item => item?.id === comment.id && item?.sessionId === comment.sessionId)) state.comments.push(comment); renderStats(); renderComments(); });
-socket.on("question:created", thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) { renderStats(); renderQueue(); } });
-socket.on("question:updated", thread => { if (!acceptsSessionEvent(state, thread) || !mergeQuestionUpdate(state, thread)) return; if(thread.giftEventId)scheduleGiftStateRefresh(thread);else{renderStats();renderQueue()} });
-for (const eventName of ["question:manually-created","question:promoted","question:priority-updated"]) socket.on(eventName, thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) render(); });
-socket.on("user:updated", user => { if (acceptsSessionEvent(state, user) && mergeUserUpdate(state, user)) { renderStats(); renderQueue(); } });
+socket.on("comment", comment => { if (!acceptsSessionEvent(state, comment)) return; if (comment?.id && !(state.comments || []).some(item => item?.id === comment.id && item?.sessionId === comment.sessionId)) state.comments.push(comment); scheduleStatsPatch(); scheduleLiveCommentPatch(comment); });
+socket.on("question:created", thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) { scheduleStatsPatch(); scheduleQueuePatch([thread.id]); scheduleLiveCommentPatch((state.comments || []).find(item => item.id === thread.commentIds?.at(-1))); } });
+socket.on("question:updated", thread => { if (!acceptsSessionEvent(state, thread) || !mergeQuestionUpdate(state, thread)) return; if(thread.giftEventId)scheduleGiftStateRefresh(thread);else{scheduleStatsPatch();scheduleQueuePatch([thread.id]);scheduleLiveCommentPatch((state.comments || []).find(item => item.id === thread.commentIds?.at(-1)));} });
+for (const eventName of ["question:manually-created","question:promoted","question:priority-updated"]) socket.on(eventName, thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) { scheduleStatsPatch(); scheduleQueuePatch([thread.id]); } });
+socket.on("user:updated", user => { if (acceptsSessionEvent(state, user) && mergeUserUpdate(state, user)) { scheduleStatsPatch(); scheduleQueuePatch(allQuestions().filter(thread => thread.userId === user.userId).map(thread => thread.id)); } });
 socket.on("viewer:updated", viewers => { if (acceptsSessionEvent(state, viewers) && mergeViewerUpdate(state, viewers)) renderStats(); });
+socket.on("like:received", payload => notifyLike(payload));
+socket.on("member:joined", payload => notifyWelcome(payload));
 socket.on("gift:received",payload=>{if(!payload?.transient)notifyGift(payload)});
 for(const eventName of ["gift:summary-updated","gift:attention-created","gift:attention-updated","gift:question-linked","gift:priority-updated","gift:acknowledged"])socket.on(eventName,payload=>{if(acceptsSessionEvent(state,payload))scheduleGiftStateRefresh(payload)});
 socket.on("gift:settings-updated",payload=>{if(!payload?.settings)return;state.giftSettings={...state.giftSettings,...payload.settings};render()});
@@ -466,6 +640,7 @@ for (const eventName of ["session:created", "session:updated", "session:ended", 
 socket.on("target:changing", payload => { state.status = { ...state.status, state: "switching", username: payload?.username, message: "Đang chuyển tài khoản...", roomId: null }; renderStatus(); });
 socket.on("target:changed", async payload => {
   clearGiftNotifications(giftNotifications);for(const timer of giftNotificationTimers.values())clearTimeout(timer);giftNotificationTimers.clear();renderGiftNotifications();
+  clearWelcomeNotifications();
   state.target = { username: payload.username, displayUsername: `@${payload.username}` };
   state.activeSession = { id: payload.sessionId, targetUsername: payload.username, status: "connecting" };
   state.selectedSession = state.activeSession; state.comments = []; state.questions = []; state.users = [];

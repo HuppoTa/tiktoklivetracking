@@ -74,3 +74,13 @@ test("viewer update thiếu count giữ giá trị gần nhất", () => {
   assert.equal(state.analytics.viewers.current, 9);
   assert.equal(state.analytics.viewers.peak, 12);
 });
+
+test("LIKE socket update merge tổng TikTok mà không làm mất viewer hiện tại", () => {
+  const state = initialDashboardState();
+  mergeViewerUpdate(state, { currentViewers: 9, peakViewers: 12, totalLikes: 120 });
+  mergeViewerUpdate(state, { totalLikes: 135, lastLikeUpdateAt: "2026-01-01T00:01:00Z" });
+  assert.equal(state.analytics.viewers.current, 9);
+  assert.equal(state.analytics.viewers.peak, 12);
+  assert.equal(state.analytics.viewers.totalLikes, 135);
+  assert.equal(state.analytics.viewers.lastLikeUpdateAt, "2026-01-01T00:01:00Z");
+});

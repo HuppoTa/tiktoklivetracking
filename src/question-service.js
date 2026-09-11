@@ -22,6 +22,55 @@ export class QuestionService {
       addedToQueueAt: now.toISOString(), createdBy: source === "classifier" ? "system" : "operator", archived: false };
   }
 
+  // Legacy threads used a single answered flag.  Keep that flag derived for every
+  // existing consumer, while making the individual question item the source of
+  // truth for reader actions.
+  normalizeQuestionItems(thread) {
+    const legacy = {
+      id: thread.id,
+      text: thread.canonicalText || "",
+      rawText: thread.canonicalText || "",
+      normalizedText: thread.normalizedText || normalizeText(thread.canonicalText || ""),
+      commentIds: [...(thread.commentIds || [])],
+      repeatCount: Number(thread.repeatCount || thread.commentIds?.length || 1),
+      createdAt: thread.createdAt,
+      updatedAt: thread.lastAskedAt || thread.createdAt,
+      lastAskedAt: thread.lastAskedAt || thread.createdAt,
+      status: thread.answered ? "ANSWERED" : "WAITING",
+      answeredAt: thread.answered ? thread.answeredAt || null : null,
+      skippedAt: null,
+      needsReview: Boolean(thread.needsReview)
+    };
+    thread.questionItems = (Array.isArray(thread.questionItems) && thread.questionItems.length ? thread.questionItems : [legacy])
+      .map(item => ({ ...legacy, ...item, rawText: item.rawText || item.text || legacy.rawText, text: item.text || item.rawText || legacy.text,
+        normalizedText: item.normalizedText || normalizeText(item.text || item.rawText || ""), commentIds: [...(item.commentIds || [])],
+        repeatCount: Number(item.repeatCount || item.commentIds?.length || 1), updatedAt: item.updatedAt || item.lastAskedAt || item.createdAt || legacy.updatedAt,
+        lastAskedAt: item.lastAskedAt || item.updatedAt || item.createdAt || legacy.lastAskedAt,
+        status: item.status || (thread.answered ? "ANSWERED" : (item.needsReview ? "NEEDS_REVIEW" : "WAITING")),
+        answeredAt: item.answeredAt || (thread.answered ? thread.answeredAt || null : null), skippedAt: item.skippedAt || null,
+        needsReview: Boolean(item.needsReview ?? thread.needsReview) }));
+    return thread.questionItems;
+  }
+
+  syncThreadQuestionState(thread, now = new Date()) {
+    const items = this.normalizeQuestionItems(thread);
+    const pending = items.filter(item => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(item.status));
+    const active = pending.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))[0] || null;
+    for (const item of items) if (item.status === "ACTIVE" && item !== active) item.status = "WAITING";
+    if (active && active.status === "WAITING") active.status = "ACTIVE";
+    thread.activeQuestionId = active?.id || null;
+    thread.answered = !active;
+    thread.answeredAt = thread.answered ? (thread.answeredAt || now.toISOString()) : null;
+    thread.canonicalText = active?.text || items[0]?.text || thread.canonicalText;
+    thread.normalizedText = active?.normalizedText || items[0]?.normalizedText || thread.normalizedText;
+    return active;
+  }
+
+  activeQuestion(thread) {
+    const active = this.syncThreadQuestionState(thread);
+    return active ? { ...active } : null;
+  }
+
   addComment(comment) {
     if (!comment?.sessionId || !comment?.targetUsername) throw new Error("COMMENT_SESSION_REQUIRED");
     if (this.store.comments.some(item => item.id === comment.id && item.sessionId === comment.sessionId)) {
@@ -30,30 +79,25 @@ export class QuestionService {
     this.store.comments.push(comment);
     if (!comment.question) return { duplicateMessage: false, comment, thread: null, threadCreated: false };
 
-    const candidates = this.store.questionThreads.filter(thread => thread.userId === comment.userId && thread.sessionId === comment.sessionId);
-    let duplicate = null;
-    let possible = null;
-    for (const thread of candidates) {
-      const result = classifySimilarity(comment.normalizedText, thread.normalizedText);
-      if (!duplicate || result.score > duplicate.score) {
-        if (result.kind === "duplicate") duplicate = { thread, score: result.score };
-      }
-      if (result.kind === "possible" && (!possible || result.score > possible.score)) {
-        possible = { thread, score: result.score };
-      }
-    }
-
-    if (duplicate) {
-      const thread = duplicate.thread;
+    const candidates = this.store.questionThreads.filter(thread => thread.userId === comment.userId && thread.sessionId === comment.sessionId && !thread.deleted && !thread.archived);
+    const thread = candidates.sort((a,b) => Number(a.queueNumber) - Number(b.queueNumber) || String(a.createdAt).localeCompare(String(b.createdAt)))[0];
+    if (thread) {
+      this.normalizeQuestionItems(thread);
+      let item = null; let best = -1;
+      for (const candidate of thread.questionItems) { const result = classifySimilarity(comment.normalizedText, candidate.normalizedText); if (result.kind === "duplicate" && result.score > best) { item = candidate; best = result.score; } }
+      const isNewQuestion = !item;
+      if (!item) { item = { id: `qi-${randomUUID()}`, text: comment.text, rawText: comment.text, normalizedText: comment.normalizedText, commentIds: [], repeatCount: 0, createdAt: comment.timestamp, updatedAt: comment.timestamp, lastAskedAt: comment.timestamp, status: comment.needsReview ? "NEEDS_REVIEW" : "WAITING", answeredAt: null, skippedAt: null, needsReview: Boolean(comment.needsReview) }; thread.questionItems.push(item); }
+      if (!item.commentIds.includes(comment.id)) item.commentIds.push(comment.id);
+      item.repeatCount = item.commentIds.length; item.lastAskedAt = comment.timestamp; item.updatedAt = comment.timestamp;
       if (!thread.commentIds.includes(comment.id)) thread.commentIds.push(comment.id);
-      thread.repeatCount = thread.commentIds.length;
-      thread.lastAskedAt = comment.timestamp;
-      thread.username = comment.username;
-      thread.nickname = comment.nickname;
+      thread.repeatCount = thread.commentIds.length; thread.lastAskedAt = comment.timestamp; thread.username = comment.username; thread.nickname = comment.nickname; thread.avatar = comment.avatar;
+      thread.updatedAt = comment.timestamp;
+      if (isNewQuestion && thread.answered) thread.answerHistory ||= [], thread.answerHistory.push({ answeredAt: thread.answeredAt, reopenedAt: comment.timestamp });
+      this.syncThreadQuestionState(thread, new Date(comment.timestamp));
       return { duplicateMessage: false, comment, thread, threadCreated: false };
     }
 
-    const thread = {
+    const createdThread = {
       id: `qt-${randomUUID()}`,
       sessionId: comment.sessionId,
       targetUsername: comment.targetUsername,
@@ -69,16 +113,19 @@ export class QuestionService {
       answeredAt: null,
       createdAt: comment.timestamp,
       lastAskedAt: comment.timestamp,
-      possibleDuplicate: possible ? { threadId: possible.thread.id, score: Number(possible.score.toFixed(3)) } : null,
+      possibleDuplicate: null,
+      questionItems: [{ id: `qi-${randomUUID()}`, text: comment.text, rawText: comment.text, normalizedText: comment.normalizedText, commentIds: [comment.id], repeatCount: 1, createdAt: comment.timestamp, updatedAt: comment.timestamp, lastAskedAt: comment.timestamp, status: comment.needsReview ? "NEEDS_REVIEW" : "ACTIVE", answeredAt: null, skippedAt: null, needsReview: Boolean(comment.needsReview) }],
       ...this.queueFields(comment)
     };
-    this.store.questionThreads.push(thread);
-    return { duplicateMessage: false, comment, thread, threadCreated: true };
+    this.syncThreadQuestionState(createdThread, new Date(comment.timestamp));
+    this.store.questionThreads.push(createdThread);
+    return { duplicateMessage: false, comment, thread: createdThread, threadCreated: true };
   }
 
   getQuestions({ answered, sort = "queue", search = "", sessionId } = {}) {
     let rows = this.store.questionThreads.filter(thread => thread.deleted !== true && thread.archived !== true);
     if (sessionId) rows = rows.filter(thread => thread.sessionId === sessionId);
+    rows.forEach(thread => this.syncThreadQuestionState(thread));
     if (typeof answered === "boolean") rows = rows.filter(thread => thread.answered === answered);
     const query = normalizeText(search);
     if (query) rows = rows.filter(thread => normalizeText(`${thread.canonicalText} ${thread.nickname} ${thread.username}`).includes(query));
@@ -92,6 +139,8 @@ export class QuestionService {
   enrichThread(thread) {
     return {
       ...thread,
+      activeQuestion: this.activeQuestion(thread),
+      questionItems: this.normalizeQuestionItems(thread).map(item => ({ ...item, occurrences: (item.commentIds || []).map(id => this.store.comments.find(comment => comment.id === id && comment.sessionId === thread.sessionId)).filter(Boolean) })),
       occurrences: thread.commentIds
         .map(id => this.store.comments.find(comment => comment.id === id && comment.sessionId === thread.sessionId))
         .filter(Boolean)
@@ -104,7 +153,7 @@ export class QuestionService {
     const userIds = new Set([...scopedComments.map(comment => comment.userId), ...scopedThreads.map(thread => thread.userId)]);
     return [...userIds].map(userId => {
       const comments = scopedComments.filter(comment => comment.userId === userId);
-      const threads = scopedThreads.filter(thread => thread.userId === userId); const occurrences = threads.reduce((sum, thread) => sum + Number(thread.repeatCount || thread.commentIds?.length || 1), 0);
+      const threads = scopedThreads.filter(thread => thread.userId === userId); threads.forEach(thread => this.syncThreadQuestionState(thread)); const items = threads.flatMap(thread => this.normalizeQuestionItems(thread)); const occurrences = items.reduce((sum, item) => sum + Number(item.repeatCount || item.commentIds?.length || 1), 0);
       const latest = comments.at(-1) || threads.at(-1) || {};
       return {
         userId,
@@ -113,10 +162,10 @@ export class QuestionService {
         avatar: latest.avatar || "",
         totalComments: comments.length,
         totalQuestions: occurrences,
-        uniqueQuestions: threads.length,
-        repeatedQuestions: Math.max(0, occurrences - threads.length),
-        unansweredQuestions: threads.filter(thread => !thread.answered).length,
-        answeredQuestions: threads.filter(thread => thread.answered).length,
+        uniqueQuestions: items.length,
+        repeatedQuestions: Math.max(0, occurrences - items.length),
+        unansweredQuestions: items.filter(item => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(item.status)).length,
+        answeredQuestions: items.filter(item => item.status === "ANSWERED").length,
         manualQuestions: threads.filter(thread => thread.source === "manual_entry").length,
         promotedQuestions: threads.filter(thread => thread.source === "promoted_comment").length
       };
@@ -131,8 +180,26 @@ export class QuestionService {
   setThreadAnswered(threadId, answered, now = new Date()) {
     const thread = this.store.questionThreads.find(item => item.id === threadId);
     if (!thread) return null;
-    thread.answered = answered;
-    thread.answeredAt = answered ? now.toISOString() : null;
+    for (const item of this.normalizeQuestionItems(thread)) {
+      if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = now.toISOString(); }
+      if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; }
+    }
+    this.syncThreadQuestionState(thread, now);
+    return thread;
+  }
+
+  setQuestionItemStatus(threadId, itemId, status, now = new Date()) {
+    if (!['ANSWERED', 'SKIPPED', 'WAITING'].includes(status)) throw new Error("INVALID_QUESTION_STATUS");
+    const thread = this.store.questionThreads.find(item => item.id === threadId);
+    if (!thread) return null;
+    const item = this.normalizeQuestionItems(thread).find(candidate => candidate.id === itemId);
+    if (!item) return null;
+    item.status = status;
+    item.updatedAt = now.toISOString();
+    item.answeredAt = status === "ANSWERED" ? now.toISOString() : null;
+    item.skippedAt = status === "SKIPPED" ? now.toISOString() : null;
+    if (status === "WAITING") { item.answeredAt = null; item.skippedAt = null; }
+    this.syncThreadQuestionState(thread, now);
     return thread;
   }
 
@@ -140,8 +207,11 @@ export class QuestionService {
     const threads = this.store.questionThreads.filter(thread => thread.userId === userId && (!sessionId || thread.sessionId === sessionId));
     const answeredAt = answered ? now.toISOString() : null;
     for (const thread of threads) {
-      thread.answered = answered;
-      thread.answeredAt = answeredAt;
+      for (const item of this.normalizeQuestionItems(thread)) {
+        if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = answeredAt; }
+        if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; }
+      }
+      this.syncThreadQuestionState(thread, now);
     }
     return threads;
   }
@@ -149,8 +219,10 @@ export class QuestionService {
   findDuplicate(comment) {
     let best = null;
     for (const thread of this.store.questionThreads.filter(item => !item.archived && item.sessionId === comment.sessionId && item.userId === comment.userId)) {
-      const result = classifySimilarity(comment.normalizedText, thread.normalizedText);
-      if (result.kind !== "new" && (!best || result.score > best.score)) best = { thread, score: result.score, kind: result.kind };
+      for (const item of this.normalizeQuestionItems(thread)) {
+        const result = classifySimilarity(comment.normalizedText, item.normalizedText);
+        if (result.kind !== "new" && (!best || result.score > best.score)) best = { thread, item, score: result.score, kind: result.kind };
+      }
     }
     return best;
   }
@@ -163,7 +235,11 @@ export class QuestionService {
     const duplicate = this.findDuplicate(comment);
     if (duplicate?.kind === "duplicate") {
       duplicate.thread.commentIds.push(comment.id); duplicate.thread.repeatCount = duplicate.thread.commentIds.length;
+      const item = duplicate.item || this.normalizeQuestionItems(duplicate.thread)[0];
+      if (!item.commentIds.includes(comment.id)) item.commentIds.push(comment.id);
+      item.repeatCount = item.commentIds.length; item.lastAskedAt = comment.timestamp; item.updatedAt = now.toISOString();
       duplicate.thread.lastAskedAt = comment.timestamp; comment.manuallyPromoted = true; comment.manuallyPromotedAt = now.toISOString(); comment.manuallyPromotedReason = reason;
+      this.syncThreadQuestionState(duplicate.thread, now);
       return { thread: duplicate.thread, created: false, idempotent: false };
     }
     const thread = { id: `qt-${randomUUID()}`, sessionId, targetUsername: comment.targetUsername, userId: comment.userId,
@@ -171,7 +247,9 @@ export class QuestionService {
       normalizedText: comment.normalizedText || normalizeText(comment.text), commentIds: [comment.id], repeatCount: 1,
       answered: false, answeredAt: null, createdAt: comment.timestamp, lastAskedAt: comment.timestamp,
       possibleDuplicate: duplicate ? { threadId: duplicate.thread.id, score: Number(duplicate.score.toFixed(3)) } : null,
+      questionItems: [{ id: `qi-${randomUUID()}`, text: comment.text, rawText: comment.text, normalizedText: comment.normalizedText || normalizeText(comment.text), commentIds: [comment.id], repeatCount: 1, createdAt: comment.timestamp, updatedAt: comment.timestamp, lastAskedAt: comment.timestamp, status: "ACTIVE", answeredAt: null, skippedAt: null, needsReview: false }],
       ...this.queueFields(comment, "promoted_comment", now), reason };
+    this.syncThreadQuestionState(thread, now);
     comment.manuallyPromoted = true; comment.manuallyPromotedAt = now.toISOString(); comment.manuallyPromotedReason = reason;
     this.store.questionThreads.push(thread); return { thread, created: true, idempotent: false };
   }
@@ -190,13 +268,17 @@ export class QuestionService {
       const target = this.store.questionThreads.find(item => item.id === (targetThreadId || duplicate?.thread.id) && item.sessionId === sessionId && item.userId === manualUserId);
       if (!target) throw new Error("DUPLICATE_TARGET_INVALID");
       this.store.comments.push(comment); target.commentIds.push(comment.id); target.repeatCount = target.commentIds.length; target.lastAskedAt = comment.timestamp;
+      const item = duplicate?.thread?.id === target.id && duplicate.item ? duplicate.item : this.normalizeQuestionItems(target).find(candidate => classifySimilarity(normalizedText, candidate.normalizedText).kind === "duplicate") || this.normalizeQuestionItems(target)[0];
+      item.commentIds.push(comment.id); item.repeatCount = item.commentIds.length; item.lastAskedAt = comment.timestamp; item.updatedAt = now.toISOString(); this.syncThreadQuestionState(target, now);
       return { thread: target, created: false, linked: true };
     }
     this.store.comments.push(comment);
     const thread = { id: `qt-${randomUUID()}`, sessionId, targetUsername: comment.targetUsername, userId: manualUserId, username: comment.username,
       nickname: comment.nickname, avatar: comment.avatar, canonicalText: text, normalizedText, commentIds: [comment.id], repeatCount: 1,
       answered: false, answeredAt: null, createdAt: now.toISOString(), lastAskedAt: now.toISOString(), possibleDuplicate: duplicate ? { threadId: duplicate.thread.id, score: Number(duplicate.score.toFixed(3)) } : null,
+      questionItems: [{ id: `qi-${randomUUID()}`, text, rawText: text, normalizedText, commentIds: [comment.id], repeatCount: 1, createdAt: now.toISOString(), updatedAt: now.toISOString(), lastAskedAt: now.toISOString(), status: "ACTIVE", answeredAt: null, skippedAt: null, needsReview: false }],
       ...this.queueFields(comment, "manual_entry", now), reason, clientRequestId: clientRequestId || null };
+    this.syncThreadQuestionState(thread, now);
     this.store.questionThreads.push(thread); return { thread, created: true, linked: false };
   }
 

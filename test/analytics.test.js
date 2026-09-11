@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAnalytics, calculateQuestionAnalytics, extractViewerCount, ViewerAnalytics } from "../src/analytics.js";
+import { buildAnalytics, calculateQuestionAnalytics, extractTotalLikeCount, extractViewerCount, ViewerAnalytics } from "../src/analytics.js";
 
 test("ROOM_USER legacy viewerCount và protobuf v3 total được map đúng", () => {
   assert.equal(extractViewerCount({ viewerCount: 12 }), 12);
@@ -22,6 +22,20 @@ test("viewer event thiếu field không ghi 0 đè dữ liệu", () => {
   assert.equal(analytics.state.currentViewers, 8);
   assert.equal(analytics.state.peakViewers, 10);
 });
+
+test("LIKE chỉ dùng totalLikeCount TikTok, giữ tổng không giảm và không tự cộng likeCount", () => {
+  const analytics = new ViewerAnalytics();
+  assert.equal(extractTotalLikeCount({ likeCount: 99 }), null);
+  assert.equal(extractTotalLikeCount({ totalLikeCount: "120" }), 120);
+  assert.equal(extractTotalLikeCount({ count: 5, total: "125" }), 125);
+  assert.equal(analytics.observeLike({ likeCount: 5, totalLikeCount: 120 }, new Date("2026-01-01T00:00:00Z")).updated, true);
+  assert.equal(analytics.observeLike({ total: 125 }, new Date("2026-01-01T00:00:00Z")).delta, 5);
+  assert.equal(analytics.observeLike({ likeCount: 5 }, new Date("2026-01-01T00:00:01Z")).updated, false);
+  assert.equal(analytics.observeLike({ totalLikeCount: 119 }, new Date("2026-01-01T00:00:02Z")).stale, true);
+  assert.equal(analytics.payload().totalLikes, 125);
+  assert.equal(analytics.payload().totalLikesSource, "like_event");
+});
+
 
 test("viewer sample chỉ thêm khi count đổi hoặc qua 15 giây", () => {
   const analytics = new ViewerAnalytics();

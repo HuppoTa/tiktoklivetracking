@@ -14,6 +14,9 @@ import { normalizeTargetInput, resolveTarget } from "./src/target.js";
 import { normalizeQuestionEvent, normalizeTikTokEvent } from "./src/tiktok-normalizer.js";
 import { normalizeTikTokGift } from "./src/tiktok-gift-normalizer.js";
 import { GiftService, validateGiftSettingsPatch } from "./src/gift-service.js";
+import { config as watchdogConfig, evaluate as evaluateWatchdog, shouldReconnect as watchdogShouldReconnect } from "./src/collector-watchdog.js";
+import { StreamEndConfirmation } from "./src/collector-lifecycle.js";
+import { buildWelcomeMemberPayload } from "./src/member-welcome.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -24,7 +27,17 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || (process.env.RAILWAY_ENVI
 const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 if ((!loopbackHosts.has(HOST) || ALLOW_REMOTE_ACCESS) && !APP_AUTH_TOKEN) throw new Error("REMOTE_ACCESS_REQUIRES_APP_AUTH_TOKEN");
 const DISABLE_TIKTOK = process.env.DISABLE_TIKTOK === "1";
+const positiveEnv=(key,fallback,min)=>{const n=Number(process.env[key]);return Number.isFinite(n)&&n>=min?n:fallback};
+const RECONNECT_COOLDOWN_MS = positiveEnv("RECONNECT_COOLDOWN_MS", 60_000, 0);
+const RECONNECT_BACKOFF_BASE_MS = positiveEnv("RECONNECT_BACKOFF_BASE_MS", 1_000, 250);
+const MAX_RECONNECT_ATTEMPTS = positiveEnv("MAX_RECONNECT_ATTEMPTS", 6, 1);
+const ENABLE_CHAT_WATCHDOG=process.env.ENABLE_CHAT_WATCHDOG==="true";
+const WATCHDOG_INTERVAL_MS=positiveEnv("WATCHDOG_INTERVAL_MS",15000,1000),CHAT_IDLE_MS=positiveEnv("CHAT_IDLE_MS",90000,10000),CHAT_STALL_SUSPECT_MS=positiveEnv("CHAT_STALL_SUSPECT_MS",180000,30000),CHAT_STALL_RECONNECT_MS=positiveEnv("CHAT_STALL_RECONNECT_MS",300000,60000);
 const QUESTION_DEBUG = process.env.QUESTION_DEBUG === "true";
+const ENABLE_WELCOME_NOTIFICATIONS = process.env.NODE_ENV === "production" ? process.env.ENABLE_WELCOME_NOTIFICATIONS === "true" : process.env.ENABLE_WELCOME_NOTIFICATIONS !== "false";
+const WELCOME_DEBUG = process.env.WELCOME_DEBUG === "true";
+const MAX_PENDING_CHAT_EVENTS = positiveEnv("MAX_PENDING_CHAT_EVENTS", 10_000, 100);
+const WATCHDOG = watchdogConfig({ ...process.env, ENABLE_CHAT_WATCHDOG: String(ENABLE_CHAT_WATCHDOG), RECONNECT_COOLDOWN_MS: String(RECONNECT_COOLDOWN_MS), MAX_RECONNECT_ATTEMPTS: String(MAX_RECONNECT_ATTEMPTS) });
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, "data");
 const storage = process.env.DATABASE_URL
   ? new NeonStorage({ databaseUrl: process.env.DATABASE_URL })
@@ -54,8 +67,18 @@ app.use((req,res,next)=>{if(req.path.startsWith("/api/")&&!['/api/health','/api/
 io.use((socket,next)=>{if(!requiresAuth||socket.handshake.auth?.token===APP_AUTH_TOKEN)return next();next(new Error("UNAUTHORIZED"));});
 app.use(express.static(join(__dirname, "public"))); app.use(express.json({ limit: "32kb" }));
 const guard = new ConnectionGuard(); let connection = null; let connectionContext = null; let analyticsSaveTimer = null;
+let reconnectPromise = null; let lastReconnectAt = 0; let reconnectFailureStreak = 0;
+let reconnectRequestVersion = 0;
+let watchdogTimer=null, connectionState="OFFLINE", pipelineFailureStreak=0;
+const streamEndConfirmation = new StreamEndConfirmation(2);
+const CHAT_FAILURE_DEGRADED_THRESHOLD=3;
+function recordChatFailure(context, stage, reason){pipelineFailureStreak++;telemetry.chatErrorCount++;chatTelemetry(stage,context,null,reason);if(pipelineFailureStreak>=CHAT_FAILURE_DEGRADED_THRESHOLD)setConnectionState("DEGRADED",context?.generation)}
+const CHAT_BATCH_DELAY_MS = 100;
+let chatBatchTimer = null; let chatBatchInFlight = false; let acceptingChatEvents = false; const pendingChatEvents = [];
 let status = { state: "idle", username: targetUsername, message: "Chưa kết nối", roomId: sessions.active?.roomId || null, lastCommentAt: null };
-const telemetry = { reconnectAttempts:0,lastConnectAttempt:null,lastSuccessfulConnect:null,lastEventAt:null,oldGenerationEventsDropped:0,wrongSessionEventsDropped:0,initialEventsDropped:0,lastDisconnectReason:null };
+const telemetry = { reconnectAttempts:0,reconnectFailureStreak:0,lastConnectAttempt:null,lastSuccessfulConnect:null,lastEventAt:null,lastAnyEventAt:null,lastChatCallbackAt:null,lastChatNormalizedAt:null,lastChatPersistedAt:null,lastChatEmittedAt:null,lastViewerEventAt:null,lastMemberEventAt:null,lastGiftEventAt:null,lastLikeEventAt:null,lastLikeUpdateAt:null,lastLikePayloadShape:null,chatReceivedCount:0,chatNormalizedCount:0,chatPersistedCount:0,chatEmittedCount:0,chatDroppedCount:0,chatDuplicateCount:0,chatErrorCount:0,chatBackpressureDroppedCount:0,likeReceivedCount:0,likeTotalUpdatedCount:0,likeMissingTotalCount:0,memberReceivedCount:0,memberEmittedCount:0,memberDuplicateCount:0,memberDroppedCount:0,lastMemberWelcomeAt:null,lastMemberDropReason:null,recentMemberOutcomes:[],recentChatOutcomes:[],oldGenerationEventsDropped:0,wrongSessionEventsDropped:0,initialEventsDropped:0,lastDisconnectReason:null };
+function chatTelemetry(stage, context, comment, reasonCode = null) { const timestamp = new Date().toISOString(); const correlationId = String(comment?.id || comment?.msgId || comment?.common?.msgId || `chat:${timestamp}`); telemetry.recentChatOutcomes.push({stage,correlationId,sessionId:context?.sessionId||null,roomId:context?.roomId||null,connectionGeneration:context?.generation||null,userId:comment?.userId||comment?.user?.id||null,timestamp,reasonCode}); if(telemetry.recentChatOutcomes.length>30)telemetry.recentChatOutcomes.shift(); return timestamp; }
+function memberTelemetry(outcome, context, payload, reasonCode = null) { const timestamp = new Date().toISOString(); telemetry.recentMemberOutcomes.push({ outcome, sessionId: context?.sessionId || payload?.sessionId || null, roomId: context?.roomId || payload?.roomId || null, connectionGeneration: context?.generation || payload?.connectionGeneration || null, userId: payload?.userId || null, timestamp, reasonCode }); if (telemetry.recentMemberOutcomes.length > 30) telemetry.recentMemberOutcomes.shift(); if (outcome === "dropped" || outcome === "error") telemetry.lastMemberDropReason = reasonCode; return timestamp; }
 const activeSession = () => sessions.active; const activeSessionId = () => activeSession()?.id;
 const targetPayload = () => ({ username: targetUsername, displayUsername: `@${targetUsername}` });
 const meta = session => ({ sessionId: session?.id || null, targetUsername: session?.targetUsername || targetUsername, roomId: session?.roomId || null, timestamp: new Date().toISOString() });
@@ -63,6 +86,7 @@ const scopedComments = id => store.comments.filter(comment => comment.sessionId 
 const scopedThreads = id => store.questionThreads.filter(thread => thread.sessionId === id && thread.deleted !== true);
 const viewerFor = session => new ViewerAnalytics(session?.viewerAnalytics);
 
+function setConnectionState(next, generation) { if(generation!==undefined&&!guard.isCurrent(generation))return; if(connectionState===next)return; connectionState=next; setStatus({connectionState:next,live:["LIVE_HEALTHY","LIVE_IDLE","CHAT_SUSPECTED_STALLED","RECONNECTING","DEGRADED"].includes(next)},generation); }
 function setStatus(next, generation) { if (generation !== undefined && !guard.isCurrent(generation)) return; status = { ...status, ...next, username: targetUsername }; io.emit("status", { ...status, ...meta(activeSession()) }); }
 function scheduleSave() { if (analyticsSaveTimer) return; analyticsSaveTimer = setTimeout(async () => { analyticsSaveTimer = null; try { await storage.save(); } catch (error) { console.error("Không lưu được analytics:", error.message); } }, 3000); }
 function eventIsCurrent(context) { const session = activeSession(); if(!context||connection!==context.connection||!guard.isCurrent(context.generation)){telemetry.oldGenerationEventsDropped++;return false} const valid=Boolean(context.sessionId&&session?.id===context.sessionId&&session.roomId===context.roomId&&session.status==="live"&&session.connectionGeneration===context.generation);if(!valid)telemetry.wrongSessionEventsDropped++;return valid; }
@@ -70,46 +94,172 @@ function isHistorical(normalized, session) { if (!normalized.eventTimestamp || !
 function emitUser(userId, sessionId) { const session = sessions.get(sessionId); const user = questions.getUsers(sessionId).find(item => item.userId === userId); if (user) io.emit("user:updated", { ...user, ...meta(session) }); }
 
 async function onChat(data, context, forcedQuestion = false) {
-  if (!eventIsCurrent(context)) return;
-  const receivedAt = new Date(); const normalized = normalizeTikTokEvent(data, receivedAt, { forcedQuestion }); if (!normalized) return;
-  const session = activeSession(); if (isHistorical(normalized, session)) { telemetry.initialEventsDropped++; return; } telemetry.lastEventAt=receivedAt.toISOString();
+  telemetry.chatReceivedCount++; telemetry.lastChatCallbackAt=chatTelemetry("CHAT_CALLBACK_RECEIVED",context,data);
+  if (!eventIsCurrent(context)) { telemetry.chatDroppedCount++; chatTelemetry("CHAT_DROPPED",context,data,"STALE_CONNECTION_GENERATION"); return; }
+  if (!acceptingChatEvents) { telemetry.chatDroppedCount++; chatTelemetry("CHAT_DROPPED",context,data,"COLLECTOR_QUIESCING"); return; }
+  const receivedAt = new Date(); let normalized; try { normalized=normalizeTikTokEvent(data, receivedAt, { forcedQuestion }); } catch { recordChatFailure(context,"CHAT_ERROR","NORMALIZE_FAILED"); return; } if (!normalized) { telemetry.chatDroppedCount++; chatTelemetry("CHAT_DROPPED",context,data,"EMPTY_TEXT"); return; }
+  telemetry.chatNormalizedCount++; telemetry.lastChatNormalizedAt=chatTelemetry("CHAT_NORMALIZED",context,normalized);
+  const session = activeSession(); if (isHistorical(normalized, session)) { telemetry.initialEventsDropped++;telemetry.chatDroppedCount++;chatTelemetry("CHAT_DROPPED",context,normalized,"HISTORICAL_EVENT"); return; } telemetry.lastEventAt=receivedAt.toISOString(); telemetry.lastAnyEventAt=telemetry.lastEventAt;
   const comment = { ...normalized, sessionId: session.id, targetUsername: session.targetUsername, roomId: session.roomId, connectionGeneration: context.generation };
-  let committed; try { committed=await storage.mutate(draft=>{const current=draft.sessions.find(s=>s.id===session.id&&s.roomId===context.roomId&&s.connectionGeneration===context.generation&&s.status==="live");if(!current)throw new Error("STALE_EVENT");const service=new QuestionService(draft),result=service.addComment(comment);if(result.duplicateMessage)return{duplicateMessage:true};if(result.thread)new GiftService(draft).link(session.id,comment.userId,result.thread.id);new SessionService(draft).refreshSummary(session.id);return{duplicateMessage:false,threadId:result.thread?.id||null,threadCreated:result.threadCreated}});} catch (error) { console.error("Không lưu được comment metadata:", error.message); return; }
-  if(committed.duplicateMessage)return;const result={thread:committed.threadId?store.questionThreads.find(q=>q.id===committed.threadId):null,threadCreated:committed.threadCreated};
-  if (!eventIsCurrent(context)) return;
-  io.emit("comment", comment);
-  if (result.thread) { const thread = questions.enrichThread(result.thread); if (!QUESTION_DEBUG) delete thread.duplicateDebug; io.emit(result.threadCreated ? "question:created" : "question:updated", { ...thread, roomId: session.roomId, timestamp: receivedAt.toISOString() }); }
-  if (comment.question) emitUser(comment.userId, session.id);
-  setStatus({ lastCommentAt: comment.receivedAt }, context.generation);
+  if (pendingChatEvents.length >= MAX_PENDING_CHAT_EVENTS) { telemetry.chatDroppedCount++; telemetry.chatBackpressureDroppedCount++; chatTelemetry("CHAT_DROPPED",context,comment,"BACKPRESSURE_PENDING_LIMIT"); return; }
+  pendingChatEvents.push({ comment, context, receivedAt });
+  scheduleChatBatch();
 }
-async function onGift(data,context){if(!eventIsCurrent(context))return;const normalized=normalizeTikTokGift(data,new Date());if(!normalized)return;const session=activeSession(),gift={...normalized,sessionId:session.id,roomId:session.roomId,connectionGeneration:context.generation};if(gift.giftType===1&&!gift.repeatEnd){io.emit("gift:received",{...meta(session),userId:gift.userId,eventId:gift.id,questionId:null,committedAt:null,transient:true,repeatCount:gift.repeatCount});return}let result;try{result=await storage.mutate(draft=>new GiftService(draft).receive(gift))}catch{return}if(result.duplicate)return;const canonicalGift=store.gifts.find(g=>g.sessionId===session.id&&g.id===gift.id),attention=gifts.attention(session.id,gift.userId),thread=attention?.linkedQuestionId?store.questionThreads.find(q=>q.id===attention.linkedQuestionId):null,payload={...meta(session),userId:gift.userId,eventId:gift.id,questionId:thread?.id||null,committedAt:new Date().toISOString(),gift:canonicalGift,summary:gifts.summary(session.id,gift.userId),attention};io.emit("gift:received",payload);io.emit("gift:summary-updated",payload);if(attention){io.emit(thread?"gift:question-linked":"gift:attention-created",payload);io.emit("gift:attention-updated",payload)}if(thread)io.emit("question:updated",{...questions.enrichThread(thread),...meta(session),giftEventId:payload.eventId});}
-function onRoomUser(data, context) { if (!eventIsCurrent(context)) return; const session = activeSession(); const analytics = viewerFor(session); const result = analytics.observeRoomUser(data); if (!result.updated) return; session.viewerAnalytics = analytics.state; io.emit("viewer:updated", { ...analytics.payload(), ...meta(session) }); if (result.sampled || result.changed) scheduleSave(); }
-function onMember(data, context) { if (!eventIsCurrent(context)) return; const session = activeSession(); const analytics = viewerFor(session); const result = analytics.observeMember(data); if (!result.updated) return; session.viewerAnalytics = analytics.state; io.emit("viewer:updated", { ...analytics.payload(), ...meta(session) }); scheduleSave(); }
-async function stopConnection() { const old = connection; connection = null; connectionContext = null; await retireConnection(guard, old); }
-function scheduleReconnect(generation, message, reason="connection_lost") { if (!guard.isCurrent(generation)) return; telemetry.reconnectAttempts++;telemetry.lastDisconnectReason=reason;sessions.markOffline(); setStatus({ state: "offline", message, roomId: null }, generation); guard.schedule(generation, () => void connectTikTok(), 30000); }
 
-async function connectTikTok() {
+function scheduleChatBatch(delay = CHAT_BATCH_DELAY_MS) {
+  if (chatBatchTimer || chatBatchInFlight) return;
+  chatBatchTimer = setTimeout(() => { chatBatchTimer = null; void flushChatBatch(); }, delay);
+}
+
+async function flushChatBatch() {
+  if (chatBatchInFlight || !pendingChatEvents.length) return;
+  chatBatchInFlight = true;
+  const batch = pendingChatEvents.splice(0);
+  let retry = false;
+  try {
+    const committed = await storage.mutate(draft => {
+      const outcomes = [];
+      const touchedSessions = new Set();
+      for (const entry of batch) {
+        const { comment, context } = entry;
+        const current = draft.sessions.find(session => session.id === comment.sessionId && session.roomId === context.roomId && session.connectionGeneration === context.generation && session.status === "live");
+        if (!current) { outcomes.push({ ...entry, stale: true }); continue; }
+        const result = new QuestionService(draft).addComment(comment);
+        if (!result.duplicateMessage && result.thread) new GiftService(draft).link(comment.sessionId, comment.userId, result.thread.id);
+        touchedSessions.add(comment.sessionId);
+        outcomes.push({ ...entry, result });
+      }
+      const service = new SessionService(draft);
+      for (const sessionId of touchedSessions) service.refreshSummary(sessionId);
+      return outcomes;
+    });
+    for (const entry of committed) {
+      const { comment, context, receivedAt, stale, result } = entry;
+      if (stale || !eventIsCurrent(context)) { telemetry.chatDroppedCount++; chatTelemetry("CHAT_DROPPED",context,comment,"STALE_CONNECTION_GENERATION"); continue; }
+      if (result?.duplicateMessage) { telemetry.chatDuplicateCount++; chatTelemetry("CHAT_DROPPED",context,comment,"DUPLICATE_TRANSPORT_EVENT"); continue; }
+      const thread = result.thread?.id ? store.questionThreads.find(item => item.id === result.thread.id) : null;
+      telemetry.chatPersistedCount++; telemetry.lastChatPersistedAt=chatTelemetry("CHAT_PERSISTED",context,comment); io.emit("comment", comment); telemetry.chatEmittedCount++; telemetry.lastChatEmittedAt=chatTelemetry("CHAT_SOCKET_EMITTED",context,comment); pipelineFailureStreak=0; setConnectionState("LIVE_HEALTHY",context.generation);
+      if (thread) { const payload = questions.enrichThread(thread); if (!QUESTION_DEBUG) delete payload.duplicateDebug; io.emit(result.threadCreated ? "question:created" : "question:updated", { ...payload, roomId: comment.roomId, timestamp: receivedAt.toISOString() }); }
+      if (comment.question) emitUser(comment.userId, comment.sessionId);
+      setStatus({ lastCommentAt: comment.receivedAt }, context.generation);
+    }
+  } catch (error) { for(const entry of batch)recordChatFailure(entry.context,"CHAT_ERROR","PERSIST_FAILED"); pendingChatEvents.unshift(...batch); retry = true; console.error("Không lưu được comment metadata:", error.message); }
+  finally { chatBatchInFlight = false; if (pendingChatEvents.length) scheduleChatBatch(retry ? 1000 : CHAT_BATCH_DELAY_MS); }
+}
+
+async function drainChatBatches() {
+  clearTimeout(chatBatchTimer); chatBatchTimer = null;
+  const deadline = Date.now() + 10_000;
+  while ((chatBatchInFlight || pendingChatEvents.length) && Date.now() < deadline) {
+    if (!chatBatchInFlight) await flushChatBatch();
+    else await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  if (pendingChatEvents.length) console.error(`Dừng service khi còn ${pendingChatEvents.length} comment chưa lưu`);
+}
+function recordTransportActivity(kind) { const at = new Date().toISOString(); telemetry.lastAnyEventAt = at; if (kind === "gift") telemetry.lastGiftEventAt = at; if (kind === "viewer") telemetry.lastViewerEventAt = at; if (kind === "member") telemetry.lastMemberEventAt = at; if (kind === "like") telemetry.lastLikeEventAt = at; }
+async function onGift(data,context){if(!eventIsCurrent(context))return;recordTransportActivity("gift");const normalized=normalizeTikTokGift(data,new Date());if(!normalized)return;const session=activeSession(),gift={...normalized,sessionId:session.id,roomId:session.roomId,connectionGeneration:context.generation};if(gift.giftType===1&&!gift.repeatEnd){io.emit("gift:received",{...meta(session),userId:gift.userId,eventId:gift.id,questionId:null,committedAt:null,transient:true,repeatCount:gift.repeatCount});return}let result;try{result=await storage.mutate(draft=>new GiftService(draft).receive(gift))}catch{return}if(result.duplicate)return;const canonicalGift=store.gifts.find(g=>g.sessionId===session.id&&g.id===gift.id),attention=gifts.attention(session.id,gift.userId),thread=attention?.linkedQuestionId?store.questionThreads.find(q=>q.id===attention.linkedQuestionId):null,payload={...meta(session),userId:gift.userId,eventId:gift.id,questionId:thread?.id||null,committedAt:new Date().toISOString(),gift:canonicalGift,summary:gifts.summary(session.id,gift.userId),attention};io.emit("gift:received",payload);io.emit("gift:summary-updated",payload);if(attention){io.emit(thread?"gift:question-linked":"gift:attention-created",payload);io.emit("gift:attention-updated",payload)}if(thread)io.emit("question:updated",{...questions.enrichThread(thread),...meta(session),giftEventId:payload.eventId});}
+function onRoomUser(data, context) { if (!eventIsCurrent(context)) return; recordTransportActivity("viewer"); const session = activeSession(); const analytics = viewerFor(session); const result = analytics.observeRoomUser(data); if (!result.updated) return; session.viewerAnalytics = analytics.state; io.emit("viewer:updated", { ...analytics.payload(), ...meta(session) }); if (result.sampled || result.changed) scheduleSave(); }
+function describeLikePayload(data) { const numericFields = {}; for (const [key, value] of Object.entries(data || {})) if (typeof value === "number" || typeof value === "bigint") numericFields[key] = String(value); return { keys:Object.keys(data || {}).sort().slice(0, 40), numericFields }; }
+function onLike(data, context) { if (!eventIsCurrent(context)) return; telemetry.likeReceivedCount++; telemetry.lastLikePayloadShape = describeLikePayload(data); recordTransportActivity("like"); const session = activeSession(); const analytics = viewerFor(session); const result = analytics.observeLike(data); if (!result.updated) { if (!result.stale) telemetry.likeMissingTotalCount++; return; } if (!result.changed) return; telemetry.likeTotalUpdatedCount++; telemetry.lastLikeUpdateAt = analytics.state.lastLikeUpdateAt; session.viewerAnalytics = analytics.state; const viewerPayload = { ...analytics.payload(), ...meta(session) }; io.emit("viewer:updated", viewerPayload); const eventCount = Number(data?.count); io.emit("like:received", { ...meta(session), eventId:String(data?.msgId || data?.common?.msgId || `like:${session.id}:${analytics.state.lastLikeUpdateAt}`), totalLikes:analytics.state.totalLikes, totalDelta:result.delta, eventCount:Number.isSafeInteger(eventCount) && eventCount > 0 ? eventCount : null, receivedAt:analytics.state.lastLikeUpdateAt }); scheduleSave(); }
+function onMember(data, context) {
+  telemetry.memberReceivedCount++;
+  if (!data || typeof data !== "object") { telemetry.memberDroppedCount++; memberTelemetry("dropped", context, null, "INVALID_MEMBER_PAYLOAD"); return; }
+  const session = activeSession();
+  if (!session) { telemetry.memberDroppedCount++; memberTelemetry("dropped", context, null, "NO_ACTIVE_SESSION"); return; }
+  if (!eventIsCurrent(context)) { telemetry.memberDroppedCount++; memberTelemetry("dropped", context, null, "STALE_CONNECTION_GENERATION"); return; }
+  recordTransportActivity("member"); const analytics = viewerFor(session);
+  const welcome = buildWelcomeMemberPayload({ data, session, welcomedUserIds: session.welcomedUserIds || [], threads: store.questionThreads, gifts: store.gifts });
+  const result = analytics.observeMember(data);
+  if (!result.updated) { if (result.duplicate) telemetry.memberDuplicateCount++; else telemetry.memberDroppedCount++; memberTelemetry(result.duplicate ? "duplicate" : "dropped", context, welcome.payload, result.duplicate ? "DUPLICATE_MEMBER_IN_SESSION" : "MISSING_MEMBER_IDENTITY"); return; }
+  session.viewerAnalytics = analytics.state; io.emit("viewer:updated", { ...analytics.payload(), ...meta(session) }); scheduleSave();
+  if (!ENABLE_WELCOME_NOTIFICATIONS) { telemetry.memberDroppedCount++; memberTelemetry("dropped", context, welcome.payload, "WELCOME_FEATURE_DISABLED"); return; }
+  if (!welcome.payload) { if (welcome.reason === "DUPLICATE_MEMBER_IN_SESSION") telemetry.memberDuplicateCount++; else telemetry.memberDroppedCount++; memberTelemetry(welcome.reason === "DUPLICATE_MEMBER_IN_SESSION" ? "duplicate" : "dropped", context, null, welcome.reason || "INVALID_MEMBER_PAYLOAD"); return; }
+  const payload = { ...welcome.payload, eventId: `member:${welcome.payload.sessionId}:${welcome.payload.userId}` };
+  try { io.emit("member:joined", payload); session.welcomedUserIds ||= []; session.welcomedUserIds.push(payload.userId); session.welcomedUserIds = [...new Set(session.welcomedUserIds)].slice(-5_000); scheduleSave(); telemetry.memberEmittedCount++; telemetry.lastMemberWelcomeAt = payload.joinedAt; memberTelemetry("emitted", context, payload); if (WELCOME_DEBUG) console.debug("[welcome] emitting", { sessionId: payload.sessionId, userId: payload.userId, displayName: payload.displayName }); }
+  catch { telemetry.memberDroppedCount++; memberTelemetry("error", context, payload, "SOCKET_EMIT_FAILED"); }
+}
+async function stopConnection() { acceptingChatEvents = false; await drainChatBatches(); if (pendingChatEvents.length) { const dropped = pendingChatEvents.splice(0); telemetry.chatDroppedCount += dropped.length; for (const entry of dropped) chatTelemetry("CHAT_DROPPED", entry.context, entry.comment, "CONNECTION_RETIRED_PENDING"); } const old = connection; connection = null; connectionContext = null; await retireConnection(guard, old); }
+async function requestReconnect(reason = "manual_reconnect", { force = false } = {}) {
+  if (reconnectPromise && !force) return reconnectPromise;
+  const elapsed = Date.now() - lastReconnectAt;
+  if (!force && elapsed < RECONNECT_COOLDOWN_MS) return { ok: false, cooldown: true, error: "Reconnect đang trong cooldown" };
+  if (force) {
+    guard.clearReconnect();
+    reconnectFailureStreak = 0;
+    telemetry.reconnectFailureStreak = 0;
+  }
+  const requestVersion = ++reconnectRequestVersion;
+  const task = (async () => {
+    lastReconnectAt = Date.now(); telemetry.reconnectAttempts++; telemetry.lastDisconnectReason = reason;
+    setConnectionState("RECONNECTING"); setStatus({ state: "reconnecting", message: "Đang kết nối lại collector...", roomId: activeSession()?.roomId || null });
+    const attempt = Math.max(1, Math.min(reconnectFailureStreak + 1, MAX_RECONNECT_ATTEMPTS));
+    const manual = reason === "manual_reconnect" || reason === "manual_connect";
+    const delay = manual ? 0 : Math.min(30_000, RECONNECT_BACKOFF_BASE_MS * 2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
+    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+    if (requestVersion !== reconnectRequestVersion) return { ok: false, stale: true };
+    return connectTikTok(reason);
+  })();
+  reconnectPromise = task;
+  try { return await task; } finally { if (reconnectPromise === task) reconnectPromise = null; }
+}
+function scheduleReconnect(generation, message, reason="connection_lost", delay=30_000) { if (!guard.isCurrent(generation)) return; sessions.markOffline(); setStatus({ state: "offline", message, roomId: null }, generation); if (reconnectFailureStreak >= MAX_RECONNECT_ATTEMPTS) return; guard.scheduleOnce(generation, () => void requestReconnect(reason), delay); }
+function watchdogTick(){const now=Date.now(),lastAnyEventAt=new Date(telemetry.lastAnyEventAt||0).getTime(),lastChatAt=new Date(telemetry.lastChatCallbackAt||0).getTime(),snapshot={now,lastChatAt,lastAnyEventAt,connected:Boolean(connection),roomId:activeSession()?.roomId||null,reconnecting:Boolean(reconnectPromise),lastReconnectAt,consecutiveFailures:reconnectFailureStreak};const next=evaluateWatchdog(snapshot,WATCHDOG);setConnectionState(next);if(watchdogShouldReconnect(snapshot,WATCHDOG))void requestReconnect("CHAT_WATCHDOG_STALLED")}
+watchdogTimer=setInterval(watchdogTick,WATCHDOG_INTERVAL_MS);watchdogTimer.unref?.();
+
+async function connectTikTok(reason = "connect") {
   if (DISABLE_TIKTOK) return { ok: false, error: "TikTok connector đang tắt" };
-  telemetry.lastConnectAttempt=new Date().toISOString(); await stopConnection(); const generation = guard.next(); const username = targetUsername;
+  acceptingChatEvents = false; telemetry.lastConnectAttempt=new Date().toISOString(); await stopConnection(); const generation = guard.next(); const username = targetUsername;
   sessions.ensurePending(username, generation); setStatus({ state: "connecting", message: `Đang kết nối @${username}...`, roomId: null }, generation);
   const current = new TikTokLiveConnection(username, { enableExtendedGiftInfo: false, processInitialData: false });
   const context = { connection: current, generation, username, sessionId: null, roomId: null }; connection = current; connectionContext = context;
   current.on(WebcastEvent.CHAT, data => void onChat(data, context, false));
   current.on(WebcastEvent.QUESTION_NEW, data => void onChat(normalizeQuestionEvent(data), context, true));
   current.on(WebcastEvent.GIFT,data=>void onGift(data,context));
-  current.on(WebcastEvent.ROOM_USER, data => onRoomUser(data, context)); current.on(WebcastEvent.MEMBER, data => onMember(data, context));
-  current.on(WebcastEvent.STREAM_END, async () => { if (!guard.isCurrent(generation)) return; const ended = sessions.closeActive("stream_end"); await storage.save(); if (ended) io.emit("session:ended", { ...sessions.summary(ended.id), ...meta(ended) }); scheduleReconnect(generation, `@${username} đã kết thúc LIVE.`); });
+  current.on(WebcastEvent.ROOM_USER, data => onRoomUser(data, context)); current.on(WebcastEvent.LIKE, data => onLike(data, context)); current.on(WebcastEvent.MEMBER, data => onMember(data, context));
+  current.on(WebcastEvent.STREAM_END, ({ action } = {}) => {
+    if (!guard.isCurrent(generation)) return;
+    const session = activeSession();
+    streamEndConfirmation.mark({ sessionId: session?.id, roomId: session?.roomId, action });
+    scheduleReconnect(generation, `TikTok báo @${username} có thể đã kết thúc LIVE — đang xác minh...`, "stream_end_signal", 2_000);
+  });
   current.on(ControlEvent.DISCONNECTED, () => scheduleReconnect(generation, "Mất kết nối — sẽ thử lại sau 30 giây"));
-  current.on(ControlEvent.ERROR, ({ info, exception } = {}) => { if (guard.isCurrent(generation)) console.error("TikTok error:", info || exception?.message || "Unknown error"); });
+  current.on(ControlEvent.ERROR, ({ info, exception } = {}) => {
+    if (!guard.isCurrent(generation)) return;
+    const message = String(info || exception?.message || "Unknown error");
+    console.error("TikTok error:", message);
+    scheduleReconnect(generation, `Collector gặp lỗi: ${message}`, "connector_error");
+  });
   try {
     const result = await current.connect(); if (connection !== current || !guard.isCurrent(generation)) return { ok: false, stale: true };
-    const attached = sessions.attachRoom(username, result.roomId, generation, new Date()); if (!attached) throw new Error("TikTok không trả room ID hợp lệ"); telemetry.lastSuccessfulConnect=new Date().toISOString();
+    const attached = sessions.attachRoom(username, result.roomId, generation, new Date()); if (!attached) throw new Error("TikTok không trả room ID hợp lệ"); telemetry.lastSuccessfulConnect=new Date().toISOString(); reconnectFailureStreak=0; telemetry.reconnectFailureStreak=0; acceptingChatEvents=true;
+    streamEndConfirmation.observeConnected({ sessionId: attached.session.id, roomId: attached.session.roomId });
     context.sessionId = attached.session.id; context.roomId = attached.session.roomId;
     const analytics = viewerFor(attached.session); analytics.startSession(result.roomId); attached.session.viewerAnalytics = analytics.state; await storage.save();
-    setStatus({ state: "live", message: "Đang thu comment trực tiếp", roomId: result.roomId }, generation);
+    setConnectionState("LIVE_IDLE",generation); setStatus({ state: "live", message: "Đang thu comment trực tiếp", roomId: result.roomId }, generation);
     io.emit(attached.created ? "session:created" : "session:updated", { ...sessions.summary(attached.session.id), ...meta(attached.session) });
     io.emit("viewer:updated", { ...analytics.payload(), ...meta(attached.session) }); return { ok: true, roomId: result.roomId, sessionId: attached.session.id };
-  } catch (error) { if (!guard.isCurrent(generation)) return { ok: false, stale: true }; const message = String(error?.message || error); const display = message.includes("not live") ? `@${username} hiện chưa livestream. Hệ thống sẽ tự thử lại sau 30 giây.` : `Không kết nối được: ${message}`; scheduleReconnect(generation, display); return { ok: false, error: display }; }
+  } catch (error) {
+    acceptingChatEvents=false;
+    if (!guard.isCurrent(generation)) return { ok: false, stale: true };
+    reconnectFailureStreak++; telemetry.reconnectFailureStreak=reconnectFailureStreak;
+    const message = String(error?.message || error);
+    const notLive = /(?:not live|isn't live|is not live|currently offline)/i.test(message);
+    const display = notLive ? `@${username} hiện chưa livestream. Hệ thống sẽ tự thử lại sau 30 giây.` : `Không kết nối được: ${message}`;
+    const confirmation = notLive ? streamEndConfirmation.observeNotLive(activeSessionId()) : { confirmed: false };
+    if (confirmation.confirmed) {
+      const ended = sessions.closeActive("stream_end_confirmed");
+      streamEndConfirmation.clear();
+      await stopConnection();
+      await storage.save();
+      if (ended) io.emit("session:ended", { ...sessions.summary(ended.id), ...meta(ended) });
+      setConnectionState("OFFLINE");
+      setStatus({ state: "idle", message: `@${username} đã kết thúc LIVE.`, roomId: null });
+      return { ok: false, ended: true, error: display };
+    }
+    setConnectionState(reconnectFailureStreak>=MAX_RECONNECT_ATTEMPTS?"ERROR":"OFFLINE",generation);
+    scheduleReconnect(generation, display, reason === "stream_end_signal" ? "stream_end_confirmation" : "connection_lost");
+    return { ok: false, error: display };
+  }
 }
 
 function validId(value) { return typeof value === "string" && value.length > 0 && value.length <= 200 && /^[\w:.-]+$/u.test(value); }
@@ -119,7 +269,19 @@ function stateFor(session) { const id = session?.id; const threads = id ? scoped
 function requireAnswered(req, res) { if (typeof req.body?.answered !== "boolean") { res.status(400).json({ error: "answered phải là boolean" }); return null; } return req.body.answered; }
 
 app.get("/api/health", (_req,res)=>res.json({status:"ok",process:{uptimeSeconds:Math.floor(process.uptime())}}));
-app.get("/api/ready", (_req,res)=>{const ready=storage.readiness();const payload={status:ready.ready?"ok":ready.storageHealthy?"degraded":"unhealthy",storage:{healthy:ready.storageHealthy,lastSaveAt:ready.lastSaveAt,lastErrorAt:ready.lastSaveErrorAt,consecutiveFailures:ready.consecutiveSaveFailures,pendingTransactions:ready.pendingTransactions},collector:{state:status.state,targetUsername,roomIdPresent:Boolean(activeSession()?.roomId),connectionGeneration:guard.generation,activeConnectionCount:connection?1:0,lastEventAt:telemetry.lastEventAt,...telemetry},process:{uptimeSeconds:Math.floor(process.uptime())}};res.status(ready.ready?200:503).json(payload);});
+app.get("/api/ready", (_req,res)=>{const ready=storage.readiness(),chatAt=new Date(telemetry.lastChatCallbackAt||0).getTime();const payload={status:ready.ready?"ok":ready.storageHealthy?"degraded":"unhealthy",storage:{healthy:ready.storageHealthy,lastSaveAt:ready.lastSaveAt,lastErrorAt:ready.lastSaveErrorAt,consecutiveFailures:ready.consecutiveSaveFailures,pendingTransactions:ready.pendingTransactions},collector:{state:status.state,connectionState,live:["LIVE_HEALTHY","LIVE_IDLE","CHAT_SUSPECTED_STALLED","RECONNECTING","DEGRADED"].includes(connectionState),watchdogEnabled:ENABLE_CHAT_WATCHDOG,welcomeNotificationsEnabled:ENABLE_WELCOME_NOTIFICATIONS,chatIdleForMs:chatAt?Date.now()-chatAt:null,reconnectInProgress:Boolean(reconnectPromise),activeConnectionCount:connection?1:0,chatReceivedCount:telemetry.chatReceivedCount,chatPersistedCount:telemetry.chatPersistedCount,chatDroppedCount:telemetry.chatDroppedCount,chatBackpressureDroppedCount:telemetry.chatBackpressureDroppedCount,memberReceivedCount:telemetry.memberReceivedCount,memberEmittedCount:telemetry.memberEmittedCount,memberDuplicateCount:telemetry.memberDuplicateCount,memberDroppedCount:telemetry.memberDroppedCount,lastMemberAt:telemetry.lastMemberEventAt,lastMemberDropReason:telemetry.lastMemberDropReason},process:{uptimeSeconds:Math.floor(process.uptime())}};res.status(ready.ready?200:503).json(payload);});
+app.get("/api/collector/telemetry", (_req,res)=>res.json({ collector:{ targetUsername, sessionId:activeSessionId()||null, roomId:activeSession()?.roomId||null, connectionGeneration:guard.generation, connectionState, acceptingChatEvents, pendingChatEvents:pendingChatEvents.length, reconnectFailureStreak, telemetry } }));
+app.post("/api/debug/welcome", (req, res) => {
+  if (process.env.NODE_ENV === "production") return res.status(404).json({ error: "Not found" });
+  if (!ENABLE_WELCOME_NOTIFICATIONS) return res.status(409).json({ error: "WELCOME_FEATURE_DISABLED" });
+  const session = activeSession(); if (!session?.roomId) return res.status(409).json({ error: "NO_ACTIVE_SESSION" });
+  const userId = String(req.body?.userId || "debug-welcome-user").trim().slice(0, 120); const nickname = String(req.body?.nickname || "Nguyễn Minh Anh").trim().slice(0, 100);
+  if (!userId || !nickname) return res.status(400).json({ error: "INVALID_MEMBER_PAYLOAD" });
+  const result = buildWelcomeMemberPayload({ data:{ user:{ id:userId, nickname } }, session, welcomedUserIds:[], threads:store.questionThreads, gifts:store.gifts });
+  const payload = { ...result.payload, eventId:`debug-member:${session.id}:${userId}:${Date.now()}`, debug:true };
+  try { io.emit("member:joined", payload); telemetry.memberEmittedCount++; telemetry.lastMemberWelcomeAt=payload.joinedAt; memberTelemetry("emitted", null, payload); if (WELCOME_DEBUG) console.debug("[welcome] emitting", { sessionId:payload.sessionId,userId:payload.userId,displayName:payload.displayName }); res.json({ ok:true, payload }); }
+  catch { telemetry.memberDroppedCount++; memberTelemetry("error", null, payload, "SOCKET_EMIT_FAILED"); res.status(500).json({ error:"SOCKET_EMIT_FAILED" }); }
+});
 
 app.get("/api/state", (req, res) => { const session = resolveSession(req, res); if ((req.query.sessionId || activeSessionId()) && !session) return; res.json(stateFor(session)); });
 app.get("/api/sessions", (_req, res) => res.json(sessions.list()));
@@ -136,6 +298,21 @@ app.post("/api/gifts/:userId/assign-question",async(req,res)=>{if(!validUserId(r
 app.get("/api/gift-settings",(_req,res)=>res.json(store.giftSettings));
 app.patch("/api/gift-settings",async(req,res)=>{let patch;try{patch=validateGiftSettingsPatch(req.body)}catch(error){return res.status(400).json({error:{code:"INVALID_GIFT_SETTINGS",message:error.message}})}try{await storage.mutate(d=>Object.assign(d.giftSettings,patch))}catch{return res.status(500).json({error:{code:"SAVE_FAILED",message:"Không lưu được cài đặt"}})}const payload={settings:store.giftSettings,sessionId:null,userId:null,questionId:null,eventId:`settings:${Date.now()}`,committedAt:new Date().toISOString()};io.emit("gift:settings-updated",payload);res.json(store.giftSettings)});
 app.patch("/api/questions/:id/answered", async (req, res) => { if (!validId(req.params.id)) return res.status(400).json({ error: "Question ID không hợp lệ" }); const session = resolveSession(req, res, { required: true }); if (!session) return; const answered = requireAnswered(req, res); if (answered === null) return; if(!scopedThreads(session.id).some(thread=>thread.id===req.params.id))return res.status(404).json({error:"Không tìm thấy câu hỏi trong phiên yêu cầu"});let id;try{id=await storage.mutate(d=>{const thread=new QuestionService(d).setThreadAnswered(req.params.id,answered);new SessionService(d).refreshSummary(session.id);return thread.id})}catch{return res.status(500).json({error:"Không lưu được trạng thái"})}const thread=store.questionThreads.find(q=>q.id===id),payload={...questions.enrichThread(thread),...meta(session)};io.emit("question:updated",payload);emitUser(thread.userId,session.id);res.json(payload); });
+app.patch("/api/questions/:id/items/:itemId", async (req, res) => {
+  if (!validId(req.params.id) || !validId(req.params.itemId)) return res.status(400).json({ error: "Question ID không hợp lệ" });
+  const session = resolveSession(req, res, { required: true }); if (!session) return;
+  const status = String(req.body?.status || "");
+  if (!['ANSWERED', 'SKIPPED', 'WAITING'].includes(status)) return res.status(400).json({ error: "Trạng thái câu hỏi không hợp lệ" });
+  if (!scopedThreads(session.id).some(thread => thread.id === req.params.id)) return res.status(404).json({ error: "Không tìm thấy câu hỏi trong phiên yêu cầu" });
+  let id;
+  try { id = await storage.mutate(d => { const thread = new QuestionService(d).setQuestionItemStatus(req.params.id, req.params.itemId, status); if (!thread) return null; new SessionService(d).refreshSummary(session.id); return thread.id; }); }
+  catch (error) { return res.status(error.message === "INVALID_QUESTION_STATUS" ? 400 : 500).json({ error: "Không lưu được trạng thái câu hỏi" }); }
+  const thread = id ? store.questionThreads.find(item => item.id === id) : null;
+  if (!thread) return res.status(404).json({ error: "Không tìm thấy câu hỏi con" });
+  const payload = { ...questions.enrichThread(thread), ...meta(session) };
+  io.emit("question:updated", payload); io.emit("queue:updated", { ...meta(session), questionId: thread.id }); emitUser(thread.userId, session.id);
+  res.json(payload);
+});
 app.patch("/api/users/:userId/answered", async (req, res) => { if (!validUserId(req.params.userId)) return res.status(400).json({ error: "User ID không hợp lệ" }); const session = resolveSession(req, res, { required: true }); if (!session) return; const answered = requireAnswered(req, res); if (answered === null) return;if(!scopedThreads(session.id).some(q=>q.userId===req.params.userId))return res.status(404).json({error:"Không tìm thấy câu hỏi của user"});let ids;try{ids=await storage.mutate(d=>{const rows=new QuestionService(d).setUserAnswered(req.params.userId,answered,new Date(),session.id);new SessionService(d).refreshSummary(session.id);return rows.map(q=>q.id)})}catch{return res.status(500).json({error:"Không lưu được trạng thái"})}const threads=ids.map(id=>store.questionThreads.find(q=>q.id===id)).filter(Boolean);for(const thread of threads)io.emit("question:updated",{...questions.enrichThread(thread),...meta(session)});emitUser(req.params.userId,session.id);res.json({userId:req.params.userId,sessionId:session.id,updated:threads.length,answered}); });
 
 app.post("/api/comments/:commentId/promote-question", async (req, res) => {
@@ -173,17 +350,18 @@ app.patch("/api/questions/:id/archive", async (req, res) => {
   const payload = { ...questions.enrichThread(thread), ...meta(session) }; io.emit("question:updated", payload); io.emit("queue:updated", { ...meta(session), questionId: thread.id }); res.json(payload);
 });
 
-app.post("/api/sessions/:id/end", async (req, res) => { if (!validId(req.params.id)) return res.status(400).json({ error: "Session ID không hợp lệ" }); const session = sessions.get(req.params.id); if (!session) return res.status(404).json({ error: "Không tìm thấy phiên" }); if (activeSessionId() === session.id) await stopConnection(); sessions.end(session.id, "manual_end"); await storage.save(); const payload = { ...sessions.summary(session.id), ...meta(session) }; io.emit("session:ended", payload); setStatus({ state: "idle", message: "Đã kết thúc phiên", roomId: null }); res.json(payload); });
-app.post("/api/sessions/start", async (_req, res) => { if (activeSession()?.status === "live") return res.status(409).json({ error: "Hãy kết thúc phiên LIVE hiện tại trước" }); const session = sessions.start(targetUsername, guard.generation + 1); await storage.save(); io.emit("session:created", { ...sessions.summary(session.id), ...meta(session) }); const result = await connectTikTok(); res.status(result.ok ? 201 : 202).json({ session: sessions.summary(session.id), connection: result }); });
+app.post("/api/sessions/:id/end", async (req, res) => { if (!validId(req.params.id)) return res.status(400).json({ error: "Session ID không hợp lệ" }); const session = sessions.get(req.params.id); if (!session) return res.status(404).json({ error: "Không tìm thấy phiên" }); if (activeSessionId() === session.id) await stopConnection(); streamEndConfirmation.clear(); sessions.end(session.id, "manual_end"); await storage.save(); const payload = { ...sessions.summary(session.id), ...meta(session) }; io.emit("session:ended", payload); setStatus({ state: "idle", message: "Đã kết thúc phiên", roomId: null }); res.json(payload); });
+app.post("/api/sessions/start", async (_req, res) => { if (activeSession()?.status === "live") return res.status(409).json({ error: "Hãy kết thúc phiên LIVE hiện tại trước" }); streamEndConfirmation.clear(); const session = sessions.start(targetUsername, guard.generation + 1); await storage.save(); io.emit("session:created", { ...sessions.summary(session.id), ...meta(session) }); const result = await connectTikTok(); res.status(result.ok ? 201 : 202).json({ session: sessions.summary(session.id), connection: result }); });
 app.post("/api/sessions/:id/reset-answers", async (req, res) => { const session = sessions.get(req.params.id); if (!session) return res.status(404).json({ error: "Không tìm thấy phiên" }); if (req.body?.confirmation !== "RESET TRA BAI") return res.status(400).json({ error: "Confirmation không hợp lệ" }); const result = sessions.resetAnswers(session.id); await storage.save(); const payload = { sessionId: session.id, updated: result.updated, ...meta(session) }; io.emit("session:answers-reset", payload); res.json(payload); });
 app.delete("/api/sessions/:id", async (req, res) => { const session = sessions.get(req.params.id); if (!session) return res.status(404).json({ error: "Không tìm thấy phiên" }); if (req.body?.confirmation !== "XOA PHIEN") return res.status(400).json({ error: "Confirmation không hợp lệ" }); if (session.status === "live" || activeSessionId() === session.id) return res.status(409).json({ error: "Phải kết thúc phiên hiện tại trước khi xóa" }); const backup = await storage.backupSession(session.id); const snapshot = structuredClone(store); try { const summary = sessions.deleteSession(session.id); await storage.save(); const payload = { sessionId: session.id, summary, backupCreated: true, ...meta(session) }; io.emit("session:deleted", payload); res.json(payload); } catch (error) { Object.assign(store, snapshot); res.status(500).json({ error: `Không xóa được phiên: ${error.message}` }); } });
 
-app.post("/api/target", async (req, res) => { const normalized = normalizeTargetInput(req.body?.username); if (!normalized) return res.status(400).json({ ok: false, error: { code: "INVALID_USERNAME", message: "TikTok ID không hợp lệ." } }); if (normalized === targetUsername) return res.json({ ok: true, unchanged: true, target: targetPayload(), status }); const previousUsername = targetUsername; io.emit("target:changing", { username: normalized, previousUsername, timestamp: new Date().toISOString(), sessionId: activeSessionId(), roomId: activeSession()?.roomId || null, targetUsername }); await stopConnection(); const switched = sessions.switchTarget(normalized, guard.generation + 1); targetUsername = normalized; await storage.save(); const payload = { username: normalized, previousUsername, sessionId: switched.session.id, targetUsername: normalized, roomId: null, timestamp: new Date().toISOString() }; io.emit("target:changed", payload); const result = await connectTikTok(); if (!result.ok) return res.status(502).json({ ok: false, error: { code: "CONNECTION_FAILED", message: result.error }, target: targetPayload(), status }); res.json({ ok: true, target: targetPayload(), status, activeSession: activeSession() }); });
-app.post("/api/connect", async (_req, res) => { const result = await connectTikTok(); res.status(result.ok ? 200 : 503).json(result.ok ? { ok: true, ...result } : { ok: false, error: result.error }); });
-app.post("/api/disconnect", async (_req, res) => { await stopConnection(); setStatus({ state: "idle", message: "Đã dừng thu comment", roomId: null }); res.json({ ok: true }); });
-app.get("/api/export.csv", (req, res) => { const session = resolveSession(req, res, { required: true }); if (!session) return; const comments = scopedComments(session.id); const threads = scopedThreads(session.id); const safe=value=>/^[=+\-@\t\r]/.test(String(value??""))?`'${value}`:value; const quote = value => `"${String(safe(value) ?? "").replaceAll('"', '""')}"`; const rows = [["sessionId","targetUsername","roomId","receivedAt","eventTimestamp","userId","username","nickname","comment","question","questionScore","questionThreadId","answered"], ...comments.map(comment => { const thread = threads.find(item => item.commentIds.includes(comment.id)); return [session.id,session.targetUsername,session.roomId,comment.receivedAt,comment.eventTimestamp,comment.userId,comment.username,comment.nickname,comment.text,comment.question,comment.questionScore,thread?.id||"",thread?.answered||false]; })]; res.setHeader("Content-Type", "text/csv; charset=utf-8"); res.setHeader("Content-Disposition", `attachment; filename="${session.targetUsername}-comments.csv"`); res.send("\uFEFF" + rows.map(row => row.map(quote).join(",")).join("\n")); });
+app.post("/api/target", async (req, res) => { const normalized = normalizeTargetInput(req.body?.username); if (!normalized) return res.status(400).json({ ok: false, error: { code: "INVALID_USERNAME", message: "TikTok ID không hợp lệ." } }); if (normalized === targetUsername) return res.json({ ok: true, unchanged: true, target: targetPayload(), status }); const previousUsername = targetUsername; io.emit("target:changing", { username: normalized, previousUsername, timestamp: new Date().toISOString(), sessionId: activeSessionId(), roomId: activeSession()?.roomId || null, targetUsername }); await stopConnection(); streamEndConfirmation.clear(); const switched = sessions.switchTarget(normalized, guard.generation + 1); targetUsername = normalized; await storage.save(); const payload = { username: normalized, previousUsername, sessionId: switched.session.id, targetUsername: normalized, roomId: null, timestamp: new Date().toISOString() }; io.emit("target:changed", payload); const result = await connectTikTok(); if (!result.ok) return res.status(502).json({ ok: false, error: { code: "CONNECTION_FAILED", message: result.error }, target: targetPayload(), status }); res.json({ ok: true, target: targetPayload(), status, activeSession: activeSession() }); });
+app.post("/api/connect", async (_req, res) => { const result = await requestReconnect("manual_connect", { force: true }); res.status(result.ok ? 200 : 503).json(result.ok ? { ok: true, ...result } : { ok: false, error: result.error }); });
+app.post("/api/collector/reconnect", async (_req, res) => { const result = await requestReconnect("manual_reconnect", { force: true }); res.status(result.ok ? 200 : 503).json({ ...result, reconnectInProgress: Boolean(reconnectPromise), reason: "MANUAL_RECONNECT" }); });
+app.post("/api/disconnect", async (_req, res) => { await stopConnection(); streamEndConfirmation.clear(); setStatus({ state: "idle", message: "Đã dừng thu comment", roomId: null }); res.json({ ok: true }); });
+app.get("/api/export.csv", (req, res) => { const session = resolveSession(req, res, { required: true }); if (!session) return; const comments = scopedComments(session.id); const threads = scopedThreads(session.id); const safe=value=>/^[=+\-@\t\r]/.test(String(value??""))?`'${value}`:value; const quote = value => `"${String(safe(value) ?? "").replaceAll('"', '""')}"`; const rows = [["sessionId","targetUsername","roomId","receivedAt","eventTimestamp","userId","username","nickname","comment","question","questionScore","questionThreadId","questionItemId","questionItemStatus","answered"], ...comments.map(comment => { const thread = threads.find(item => item.commentIds.includes(comment.id)); const item = thread ? questions.normalizeQuestionItems(thread).find(candidate => candidate.commentIds.includes(comment.id)) : null; return [session.id,session.targetUsername,session.roomId,comment.receivedAt,comment.eventTimestamp,comment.userId,comment.username,comment.nickname,comment.text,comment.question,comment.questionScore,thread?.id||"",item?.id||"",item?.status||"",thread?.answered||false]; })]; res.setHeader("Content-Type", "text/csv; charset=utf-8"); res.setHeader("Content-Disposition", `attachment; filename="${session.targetUsername}-comments.csv"`); res.send("\uFEFF" + rows.map(row => row.map(quote).join(",")).join("\n")); });
 
 io.on("connection", socket => { socket.emit("status", { ...status, ...meta(activeSession()) }); const session = activeSession(); if (session) socket.emit("viewer:updated", { ...viewerFor(session).payload(), ...meta(session) }); });
 httpServer.listen(PORT, HOST, () => { console.log(`LIVE Comment Hub: http://${HOST}:${PORT}`); console.log(`Đang theo dõi: @${targetUsername}`); if (!DISABLE_TIKTOK) void connectTikTok(); });
-async function shutdown() { clearTimeout(analyticsSaveTimer); await stopConnection(); try { await storage.save(); } catch {} httpServer.close(() => process.exit(0)); }
+async function shutdown() { clearTimeout(analyticsSaveTimer); clearInterval(watchdogTimer); await drainChatBatches(); await stopConnection(); try { await storage.save(); } catch {} httpServer.close(() => process.exit(0)); }
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);
