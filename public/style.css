@@ -59,6 +59,17 @@ body {
   letter-spacing: -0.01em;
 }
 
+.authLocked > :not(.loginView):not(script) { display: none !important; }
+.loginView { min-height: 100vh; padding: 24px; display: grid; place-items: center; }
+.loginView[hidden] { display: none; }
+.loginCard { width: min(420px, 100%); padding: 34px; display: grid; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow-soft); }
+.loginCard .brandMark { margin-bottom: 8px; }
+.loginCard h1 { margin: 0; font-size: 27px; line-height: 1.2; }
+.loginCard > p:not(.modalError) { margin: 0 0 8px; color: var(--text-muted); }
+.loginCard label { color: var(--text-secondary); font-size: 13px; font-weight: 700; }
+.loginCard input { width: 100%; padding: 12px 13px; color: var(--text); background: var(--surface-strong); border: 1px solid var(--border); border-radius: 10px; }
+.loginCard .btn { margin-top: 8px; }
+
 button, input, select, textarea {
   font: inherit;
 }

@@ -11,9 +11,9 @@ const API_BASE = String(globalThis.__APP_CONFIG__?.apiBaseUrl || "").replace(/\/
 const SOCKET_URL = String(globalThis.__APP_CONFIG__?.socketUrl || API_BASE || "").replace(/\/$/, "");
 const SOCKET_PATH = String(globalThis.__APP_CONFIG__?.socketPath || "/socket.io");
 const DEV_REMOTE = globalThis.__APP_CONFIG__?.devRemote === true;
-const TOKEN_KEY = "live-comment-hub-auth-token";
+const TOKEN_KEY = "live-comment-hub-session";
 const WELCOME_DEBUG = ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
-let authToken = String(globalThis.__APP_CONFIG__?.authToken || sessionStorage.getItem(TOKEN_KEY) || "");
+let authToken = sessionStorage.getItem(TOKEN_KEY) || "";
 const socket = io(SOCKET_URL || undefined, { path: SOCKET_PATH, autoConnect: false, ...(DEV_REMOTE ? { transports: ["websocket", "polling"], tryAllTransports: true } : {}), auth: callback => callback({ token: authToken }) });
 let state = initialDashboardState();
 const COMMENT_PAGE_SIZE = 100;
@@ -334,7 +334,7 @@ function renderSessions() {
   $("endSession").disabled = !selected || selected.id !== state.activeSession?.id || selected.status === "ended";
   $("deleteSession").disabled = !selected || selected.id === state.activeSession?.id || selected.status === "live";
   $("resetAnswers").disabled = !selected;
-  $("exportCsv").href = selected?.id ? `${API_BASE}/api/export.csv?sessionId=${encodeURIComponent(selected.id)}` : "#";
+  $("exportCsv").dataset.url = selected?.id ? `/api/export.csv?sessionId=${encodeURIComponent(selected.id)}` : "";
   const questionComments = (state.comments || []).filter(item => item?.question).length;
   const questionOccurrences = (state.questions || []).reduce((sum, item) => sum + (Array.isArray(item?.commentIds) ? item.commentIds.length : Number(item?.repeatCount || 0)), 0);
   const answeredThreads = (state.questions || []).filter(item => item?.answered === true && item?.deleted !== true).length;
@@ -424,25 +424,60 @@ function toast(message, action) {
   toast.timer = setTimeout(() => $("toast").classList.remove("show"), action ? 6000 : 2800);
 }
 
-function requestAuthToken() {
-  const value = window.prompt("Nhập APP_AUTH_TOKEN để mở dashboard. Token chỉ được giữ trong tab hiện tại.", "");
-  if (!value?.trim()) return false;
-  authToken = value.trim();
-  sessionStorage.setItem(TOKEN_KEY, authToken);
-  return true;
+function showLogin(message = "") {
+  authToken = ""; sessionStorage.removeItem(TOKEN_KEY); dashboardLoaded = false; socket.disconnect();
+  document.body.classList.add("authLocked"); $("loginView").hidden = false;
+  $("loginError").textContent = message; $("loginError").hidden = !message;
+  setTimeout(() => $("loginUsername").focus(), 0);
 }
 
-async function requestJson(url, options = {}, allowAuthPrompt = true) {
+function showDashboard() { document.body.classList.remove("authLocked"); $("loginView").hidden = true; }
+
+async function requestJson(url, options = {}, handleUnauthorized = true) {
   const headers = new Headers(options.headers || {});
   if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
   const response = await fetch(`${API_BASE}${url}`, { ...options, headers });
-  if (response.status === 401 && allowAuthPrompt && requestAuthToken()) return requestJson(url, options, false);
+  if (response.status === 401 && handleUnauthorized) showLogin("Phiên đăng nhập đã hết hạn hoặc được mở ở trình duyệt khác.");
   const text = await response.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { throw new Error("Server trả dữ liệu không hợp lệ"); }
   if (!response.ok) { const error = new Error(data?.error?.message || data?.error || `Yêu cầu thất bại (${response.status})`); error.data = data; error.status = response.status; throw error; }
   return data;
 }
+
+async function startDashboard() {
+  await requestJson("/api/auth/session", {}, false);
+  showDashboard();
+  await syncDashboardState();
+  dashboardLoaded = true; socket.connect(); if (DEV_REMOTE) void pollDevTelemetry();
+}
+
+$("loginForm").addEventListener("submit", async event => {
+  event.preventDefault(); const button=$("loginButton");button.disabled=true;button.textContent="Đang đăng nhập…";$("loginError").hidden=true;
+  try {
+    const response = await fetch(`${API_BASE}/api/auth/login`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({username:$("loginUsername").value,password:$("loginPassword").value}) });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.token) throw new Error(data?.error?.message || "Không đăng nhập được");
+    authToken=data.token;sessionStorage.setItem(TOKEN_KEY,authToken);$("loginPassword").value="";await startDashboard();
+  } catch(error) { showLogin(error.message); }
+  finally { button.disabled=false;button.textContent="Đăng nhập"; }
+});
+
+$("logoutButton").addEventListener("click", async () => {
+  try { await requestJson("/api/auth/logout", { method:"POST" }, false); } catch {}
+  showLogin("Đã đăng xuất.");
+});
+
+$("exportCsv").addEventListener("click", async event => {
+  event.preventDefault(); const path=event.currentTarget.dataset.url;if(!path)return;
+  try {
+    const response=await fetch(`${API_BASE}${path}`,{headers:{Authorization:`Bearer ${authToken}`}});
+    if(response.status===401){showLogin("Phiên đăng nhập đã hết hạn hoặc được mở ở trình duyệt khác.");return}
+    if(!response.ok)throw new Error(`Không xuất được CSV (${response.status})`);
+    const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
+    link.href=url;link.download=response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]||"comments.csv";link.click();URL.revokeObjectURL(url);
+  } catch(error){reportError(error,error.message)}
+});
 
 function syncDashboardState() {
   if (dashboardSyncInFlight) return dashboardSyncInFlight;
@@ -676,12 +711,12 @@ window.addEventListener("error", event => reportError(event.error || new Error(e
 window.addEventListener("unhandledrejection", event => reportError(event.reason, "Một thao tác chưa hoàn tất. Vui lòng thử lại."));
 
 updateSortOptions();
-syncDashboardState().then(() => { dashboardLoaded = true; socket.connect(); if (DEV_REMOTE) void pollDevTelemetry(); }).catch(error => reportError(error, "Không tải được dữ liệu dashboard"));
+if (authToken) startDashboard().catch(() => showLogin("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại."));
+else showLogin();
 socket.on("connect", () => { if (dashboardLoaded) void syncDashboardState().catch(error => reportError(error, "Đã kết nối lại nhưng chưa đồng bộ được comment mới")); });
 socket.on("connect_error", error => {
   if (String(error?.message || "").includes("UNAUTHORIZED")) {
-    authToken = ""; sessionStorage.removeItem(TOKEN_KEY); socket.disconnect();
-    reportError(error, "Token không hợp lệ. Tải lại trang để nhập lại.");
+    showLogin("Phiên đăng nhập đã hết hạn hoặc được mở ở trình duyệt khác.");
   }
 });
 socket.on("status", value => { if (value && typeof value === "object") state.status = { ...state.status, ...value }; renderStatus(); });

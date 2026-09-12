@@ -19,15 +19,17 @@ import { config as watchdogConfig, evaluate as evaluateWatchdog, shouldReconnect
 import { StreamEndConfirmation } from "./src/collector-lifecycle.js";
 import { buildWelcomeMemberPayload } from "./src/member-welcome.js";
 import { connectWithRoomFallback, describeConnectionError, errorSourceMessages, isOfflineError, reconnectBackoffMs, ReconnectController } from "./src/reconnect-policy.js";
+import { AuthService, LoginRateLimiter, MemorySessionRepository, NeonSessionRepository } from "./src/auth-service.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
 const ALLOW_REMOTE_ACCESS = process.env.ALLOW_REMOTE_ACCESS === "true";
 const APP_AUTH_TOKEN = process.env.APP_AUTH_TOKEN || "";
+const AUTH_USERNAME = process.env.AUTH_USERNAME || "";
+const AUTH_PASSWORD_HASH = process.env.AUTH_PASSWORD_HASH || "";
 const REMOTE_BACKEND_MODE = process.env.REMOTE_BACKEND_MODE === "1";
 const REMOTE_BACKEND_URL = process.env.REMOTE_BACKEND_URL || process.env.API_BASE_URL || "https://tiktoklivetracking-api.onrender.com";
-const DEV_REMOTE_AUTH_TOKEN = APP_AUTH_TOKEN;
 const API_BASE_URL = REMOTE_BACKEND_MODE ? "/remote" : process.env.API_BASE_URL || "";
 const SOCKET_URL = REMOTE_BACKEND_MODE ? "" : process.env.SOCKET_URL || API_BASE_URL;
 const FRONTEND_ORIGINS = new Set([
@@ -37,7 +39,7 @@ const FRONTEND_ORIGINS = new Set([
   ...String(process.env.FRONTEND_ORIGIN || "").split(",").map(value => value.trim()).filter(Boolean),
 ]);
 const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
-if ((!loopbackHosts.has(HOST) || ALLOW_REMOTE_ACCESS) && !APP_AUTH_TOKEN) throw new Error("REMOTE_ACCESS_REQUIRES_APP_AUTH_TOKEN");
+if ((!loopbackHosts.has(HOST) || ALLOW_REMOTE_ACCESS) && !(AUTH_USERNAME && AUTH_PASSWORD_HASH) && !APP_AUTH_TOKEN) throw new Error("REMOTE_ACCESS_REQUIRES_AUTH");
 const DISABLE_TIKTOK = process.env.DISABLE_TIKTOK === "1" || REMOTE_BACKEND_MODE;
 const positiveEnv=(key,fallback,min)=>{const n=Number(process.env[key]);return Number.isFinite(n)&&n>=min?n:fallback};
 const RECONNECT_COOLDOWN_MS = positiveEnv("RECONNECT_COOLDOWN_MS", 10_000, 1_000);
@@ -55,6 +57,13 @@ const storage = process.env.DATABASE_URL
   ? new NeonStorage({ databaseUrl: process.env.DATABASE_URL })
   : new JsonStorage({ storeFile: join(DATA_DIR, "store.json"), legacyFile: join(DATA_DIR, "comments.json") });
 const store = await storage.load();
+const auth = new AuthService({
+  username: AUTH_USERNAME,
+  passwordHash: AUTH_PASSWORD_HASH,
+  repository: storage.sql ? new NeonSessionRepository(storage.sql) : new MemorySessionRepository(),
+});
+await auth.initialize();
+const loginLimiter = new LoginRateLimiter();
 const questions = new QuestionService(store); const sessions = new SessionService(store);
 const gifts = new GiftService(store);
 let targetUsername = resolveTarget(process.env.TIKTOK_USERNAME, store.settings?.targetUsername);
@@ -75,21 +84,55 @@ app.use((req, res, next) => {
   }
   next();
 });
-const requiresAuth = Boolean(APP_AUTH_TOKEN); const authorized = req => !requiresAuth || req.headers.authorization === `Bearer ${APP_AUTH_TOKEN}`;
-app.use((req,res,next)=>{if(req.path.startsWith("/api/")&&!['/api/health','/api/ready'].includes(req.path)&&!authorized(req))return res.status(401).json({error:{code:"UNAUTHORIZED",message:"Authentication required"}});next();});
-io.use((socket,next)=>{if(!requiresAuth||socket.handshake.auth?.token===APP_AUTH_TOKEN)return next();next(new Error("UNAUTHORIZED"));});
+app.use(express.json({ limit: "32kb" }));
+const bearerToken = value => /^Bearer\s+(.+)$/i.exec(String(value || ""))?.[1] || "";
+const requiresAuth = auth.enabled || Boolean(APP_AUTH_TOKEN);
+const authenticateRequest = async req => {
+  const token = bearerToken(req.headers.authorization);
+  if (auth.enabled) return auth.authenticate(token, req.headers["user-agent"]);
+  return APP_AUTH_TOKEN && token === APP_AUTH_TOKEN ? { username: "legacy" } : null;
+};
+app.post("/api/auth/login", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  if (!auth.enabled) return res.status(503).json({ error: { code: "AUTH_NOT_CONFIGURED", message: "Đăng nhập chưa được cấu hình" } });
+  const username = String(req.body?.username || "").slice(0, 100);
+  const password = String(req.body?.password || "").slice(0, 256);
+  const limit = loginLimiter.check(req.ip, username);
+  if (!limit.allowed) {
+    res.setHeader("Retry-After", String(Math.max(1, Math.ceil(limit.retryAfterMs / 1000))));
+    return res.status(429).json({ error: { code: "LOGIN_RATE_LIMITED", message: "Đăng nhập tạm khóa. Vui lòng thử lại sau." } });
+  }
+  const session = await auth.login({ username, password, userAgent: req.headers["user-agent"] });
+  if (!session) {
+    loginLimiter.fail(req.ip, username);
+    return res.status(401).json({ error: { code: "INVALID_CREDENTIALS", message: "Tên đăng nhập hoặc mật khẩu không đúng" } });
+  }
+  loginLimiter.clear(req.ip, username);
+  res.json(session);
+});
+app.get("/api/auth/session", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const session = await authenticateRequest(req);
+  if (!session) return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Vui lòng đăng nhập" } });
+  res.json({ username: session.username, expiresAt: session.expiresAt || null });
+});
+app.post("/api/auth/logout", async (req, res) => {
+  const token = bearerToken(req.headers.authorization);
+  if (auth.enabled) await auth.logout(token);
+  res.status(204).end();
+});
+app.use(async (req,res,next)=>{if(!req.path.startsWith("/api/")||['/api/health','/api/ready'].includes(req.path)||req.path.startsWith('/api/auth/'))return next();if(!requiresAuth)return next();const session=await authenticateRequest(req);if(!session)return res.status(401).json({error:{code:"UNAUTHORIZED",message:"Vui lòng đăng nhập"}});req.auth=session;next();});
+io.use(async (socket,next)=>{if(!requiresAuth)return next();const token=String(socket.handshake.auth?.token||"");const session=auth.enabled?await auth.authenticate(token,socket.handshake.headers["user-agent"]):(APP_AUTH_TOKEN&&token===APP_AUTH_TOKEN?{username:"legacy"}:null);if(session){socket.data.auth=session;return next()}next(new Error("UNAUTHORIZED"));});
 app.get("/runtime-config.js", (_req, res) => {
   const config = REMOTE_BACKEND_MODE
-    ? { apiBaseUrl: API_BASE_URL, socketUrl: SOCKET_URL, socketPath: "/remote/socket.io", devRemote: true, authToken: DEV_REMOTE_AUTH_TOKEN }
+    ? { apiBaseUrl: API_BASE_URL, socketUrl: SOCKET_URL, socketPath: "/remote/socket.io", devRemote: true }
     : { apiBaseUrl: API_BASE_URL, socketUrl: SOCKET_URL };
   res.type("application/javascript").send(`globalThis.__APP_CONFIG__ = ${JSON.stringify(config)};\n`);
 });
 if (REMOTE_BACKEND_MODE) {
-  if (!DEV_REMOTE_AUTH_TOKEN) throw new Error("DEV_REMOTE_REQUIRES_APP_AUTH_TOKEN");
   const remote = new URL(REMOTE_BACKEND_URL);
   if (remote.protocol !== "https:") throw new Error("REMOTE_BACKEND_URL_MUST_USE_HTTPS");
   const proxy = httpProxy.createProxyServer({ target: remote.origin, changeOrigin: true, secure: true, ws: true });
-  proxy.on("proxyReq", proxyReq => proxyReq.setHeader("Authorization", `Bearer ${DEV_REMOTE_AUTH_TOKEN}`));
   proxy.on("error", (error, _req, resOrSocket) => {
     console.error("Development proxy error:", error.message);
     if (typeof resOrSocket?.writeHead === "function") resOrSocket.writeHead(502, { "Content-Type": "application/json" });
@@ -103,7 +146,7 @@ if (REMOTE_BACKEND_MODE) {
     proxy.ws(req, socket, head);
   });
 }
-app.use(express.static(join(__dirname, "public"))); app.use(express.json({ limit: "32kb" }));
+app.use(express.static(join(__dirname, "public")));
 const guard = new ConnectionGuard(); let connection = null; let connectionContext = null; let analyticsSaveTimer = null;
 const reconnectController = new ReconnectController({ cooldownMs: RECONNECT_COOLDOWN_MS }); let reconnectFailureStreak = 0;
 let reconnectRequestVersion = 0;

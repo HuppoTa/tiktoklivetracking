@@ -7,10 +7,24 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/runtime-config.js"></script>
 </head>
-<body>
+<body class="authLocked">
+  <section id="loginView" class="loginView" aria-labelledby="loginTitle">
+    <form id="loginForm" class="loginCard">
+      <span class="brandMark" aria-hidden="true">◉</span>
+      <span class="eyebrow">LIVE COMMENT HUB</span>
+      <h1 id="loginTitle">Đăng nhập dashboard</h1>
+      <p>Phiên đăng nhập chỉ hoạt động trên trình duyệt này.</p>
+      <label for="loginUsername">Tên đăng nhập</label>
+      <input id="loginUsername" name="username" autocomplete="username" autocapitalize="none" required maxlength="100">
+      <label for="loginPassword">Mật khẩu</label>
+      <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="256">
+      <p id="loginError" class="modalError" role="alert" hidden></p>
+      <button id="loginButton" class="btn" type="submit">Đăng nhập</button>
+    </form>
+  </section>
   <header class="topbar">
     <div class="brand"><span class="brandMark">◉</span><div><b>LIVE Comment Hub</b><small id="headerTarget">@kathyuyen.ta</small></div><button id="changeTarget" class="linkBtn">Đổi tài khoản</button></div>
-    <div class="actions"><button id="giftSettingsButton" class="btn ghost">Cài đặt quà</button><a id="exportCsv" class="btn ghost" href="/api/export.csv">Xuất CSV</a><button id="retry" class="btn ghost" hidden>Thử lại ngay</button><button id="toggle" class="btn">Dừng thu</button></div>
+    <div class="actions"><button id="giftSettingsButton" class="btn ghost">Cài đặt quà</button><a id="exportCsv" class="btn ghost" href="#">Xuất CSV</a><button id="retry" class="btn ghost" hidden>Thử lại ngay</button><button id="toggle" class="btn">Dừng thu</button><button id="logoutButton" class="btn ghost">Đăng xuất</button></div>
   </header>
   <main>
     <section class="hero">
