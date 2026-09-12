@@ -25,7 +25,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
 const ALLOW_REMOTE_ACCESS = process.env.ALLOW_REMOTE_ACCESS === "true";
-const APP_AUTH_TOKEN = process.env.APP_AUTH_TOKEN || "";
 const AUTH_USERNAME = process.env.AUTH_USERNAME || "";
 const AUTH_PASSWORD_HASH = process.env.AUTH_PASSWORD_HASH || "";
 const REMOTE_BACKEND_MODE = process.env.REMOTE_BACKEND_MODE === "1";
@@ -39,7 +38,7 @@ const FRONTEND_ORIGINS = new Set([
   ...String(process.env.FRONTEND_ORIGIN || "").split(",").map(value => value.trim()).filter(Boolean),
 ]);
 const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
-if ((!loopbackHosts.has(HOST) || ALLOW_REMOTE_ACCESS) && !(AUTH_USERNAME && AUTH_PASSWORD_HASH) && !APP_AUTH_TOKEN) throw new Error("REMOTE_ACCESS_REQUIRES_AUTH");
+if ((!loopbackHosts.has(HOST) || ALLOW_REMOTE_ACCESS) && !(AUTH_USERNAME && AUTH_PASSWORD_HASH)) throw new Error("REMOTE_ACCESS_REQUIRES_AUTH");
 const DISABLE_TIKTOK = process.env.DISABLE_TIKTOK === "1" || REMOTE_BACKEND_MODE;
 const positiveEnv=(key,fallback,min)=>{const n=Number(process.env[key]);return Number.isFinite(n)&&n>=min?n:fallback};
 const RECONNECT_COOLDOWN_MS = positiveEnv("RECONNECT_COOLDOWN_MS", 10_000, 1_000);
@@ -86,11 +85,10 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: "32kb" }));
 const bearerToken = value => /^Bearer\s+(.+)$/i.exec(String(value || ""))?.[1] || "";
-const requiresAuth = auth.enabled || Boolean(APP_AUTH_TOKEN);
+const requiresAuth = auth.enabled;
 const authenticateRequest = async req => {
   const token = bearerToken(req.headers.authorization);
-  if (auth.enabled) return auth.authenticate(token, req.headers["user-agent"]);
-  return APP_AUTH_TOKEN && token === APP_AUTH_TOKEN ? { username: "legacy" } : null;
+  return auth.authenticate(token, req.headers["user-agent"]);
 };
 app.post("/api/auth/login", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -122,7 +120,7 @@ app.post("/api/auth/logout", async (req, res) => {
   res.status(204).end();
 });
 app.use(async (req,res,next)=>{if(!req.path.startsWith("/api/")||['/api/health','/api/ready'].includes(req.path)||req.path.startsWith('/api/auth/'))return next();if(!requiresAuth)return next();const session=await authenticateRequest(req);if(!session)return res.status(401).json({error:{code:"UNAUTHORIZED",message:"Vui lòng đăng nhập"}});req.auth=session;next();});
-io.use(async (socket,next)=>{if(!requiresAuth)return next();const token=String(socket.handshake.auth?.token||"");const session=auth.enabled?await auth.authenticate(token,socket.handshake.headers["user-agent"]):(APP_AUTH_TOKEN&&token===APP_AUTH_TOKEN?{username:"legacy"}:null);if(session){socket.data.auth=session;return next()}next(new Error("UNAUTHORIZED"));});
+io.use(async (socket,next)=>{if(!requiresAuth)return next();const token=String(socket.handshake.auth?.token||"");const session=await auth.authenticate(token,socket.handshake.headers["user-agent"]);if(session){socket.data.auth=session;return next()}next(new Error("UNAUTHORIZED"));});
 app.get("/runtime-config.js", (_req, res) => {
   const config = REMOTE_BACKEND_MODE
     ? { apiBaseUrl: API_BASE_URL, socketUrl: SOCKET_URL, socketPath: "/remote/socket.io", devRemote: true }

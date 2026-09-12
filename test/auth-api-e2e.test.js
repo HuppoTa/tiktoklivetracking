@@ -12,7 +12,7 @@ const headers=token=>({"user-agent":agent,...(token?{authorization:`Bearer ${tok
 async function waitReady(){for(let i=0;i<60;i++){try{if((await fetch(`${base}/api/health`)).ok)return}catch{}await new Promise(r=>setTimeout(r,50))}throw Error("server timeout")}
 async function login(){const response=await fetch(`${base}/api/auth/login`,{method:"POST",headers:{...headers(),"content-type":"application/json"},body:JSON.stringify({username:"kathy",password:"fixture-password"})});assert.equal(response.status,200);return response.json()}
 
-test.before(async()=>{const dir=await mkdtemp(join(tmpdir(),"hub-auth-api-")),passwordHash=await hashPassword("fixture-password");child=spawn(process.execPath,["server.js"],{cwd:process.cwd(),env:{...process.env,DATA_DIR:dir,DISABLE_TIKTOK:"1",PORT:String(port),HOST:"127.0.0.1",AUTH_USERNAME:"kathy",AUTH_PASSWORD_HASH:passwordHash,APP_AUTH_TOKEN:""},stdio:"ignore"});await waitReady()});
+test.before(async()=>{const dir=await mkdtemp(join(tmpdir(),"hub-auth-api-")),passwordHash=await hashPassword("fixture-password");child=spawn(process.execPath,["server.js"],{cwd:process.cwd(),env:{...process.env,DATA_DIR:dir,DISABLE_TIKTOK:"1",PORT:String(port),HOST:"127.0.0.1",AUTH_USERNAME:"kathy",AUTH_PASSWORD_HASH:passwordHash},stdio:"ignore"});await waitReady()});
 test.after(()=>child?.kill("SIGTERM"));
 
 test("API và Socket.IO yêu cầu login, login thứ hai thu hồi session đầu", async()=>{
