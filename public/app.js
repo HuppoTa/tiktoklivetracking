@@ -9,16 +9,23 @@ import { addWelcome, clearWelcomeStore, createWelcomeStore, takeWelcomeBurst, WE
 
 const API_BASE = String(globalThis.__APP_CONFIG__?.apiBaseUrl || "").replace(/\/$/, "");
 const SOCKET_URL = String(globalThis.__APP_CONFIG__?.socketUrl || API_BASE || "").replace(/\/$/, "");
+const SOCKET_PATH = String(globalThis.__APP_CONFIG__?.socketPath || "/socket.io");
+const DEV_REMOTE = globalThis.__APP_CONFIG__?.devRemote === true;
 const TOKEN_KEY = "live-comment-hub-auth-token";
 const WELCOME_DEBUG = ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
-let authToken = sessionStorage.getItem(TOKEN_KEY) || "";
-const socket = io(SOCKET_URL || undefined, { autoConnect: false, auth: callback => callback({ token: authToken }) });
+let authToken = String(globalThis.__APP_CONFIG__?.authToken || sessionStorage.getItem(TOKEN_KEY) || "");
+const socket = io(SOCKET_URL || undefined, { path: SOCKET_PATH, autoConnect: false, ...(DEV_REMOTE ? { transports: ["websocket", "polling"], tryAllTransports: true } : {}), auth: callback => callback({ token: authToken }) });
 let state = initialDashboardState();
 const COMMENT_PAGE_SIZE = 100;
 let visibleCommentCount = COMMENT_PAGE_SIZE;
 let dashboardLoaded = false;
 let dashboardSyncInFlight = null;
 let collectorActionInFlight = false;
+let reconnectCountdownTimer = null;
+let memberCountBaseline = null;
+let memberBaselineSessionId = null;
+let chatCountBaseline = null;
+let devTelemetryPollInFlight = false;
 const pendingLiveComments = new Map();
 const pendingQueueThreadIds = new Set();
 let livePatchFrame = null;
@@ -309,7 +316,13 @@ function renderStatus() {
   $("toggle").textContent = ["live", "connecting"].includes(connectionState) ? "Dừng thu" : "Bắt đầu thu"; $("toggle").disabled = historical || collectorActionInFlight;
   $("headerTarget").textContent = state.target?.displayUsername || `@${state.status?.username || "kathyuyen.ta"}`;
   $("changeTarget").disabled = connectionState === "switching";
-  $("retry").hidden = connectionState !== "offline"; $("retry").disabled = collectorActionInFlight;
+  const retryAt = new Date(state.status?.nextReconnectAt || 0).getTime();
+  const retrySeconds = Number.isFinite(retryAt) ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) : 0;
+  $("retry").hidden = connectionState !== "offline";
+  $("retry").disabled = collectorActionInFlight || retrySeconds > 0;
+  $("retry").textContent = retrySeconds > 0 ? `Thử lại sau ${retrySeconds}s` : "Thử lại ngay";
+  clearTimeout(reconnectCountdownTimer);
+  reconnectCountdownTimer = retrySeconds > 0 ? setTimeout(renderStatus, 1_000) : null;
 }
 
 function renderSessions() {
@@ -349,6 +362,45 @@ function renderWelcomeNotification(){const root=$("welcomeToasts");if(!activeWel
 function showNextWelcome(){if(activeWelcome)return;activeWelcome=takeWelcomeBurst(welcomeNotifications);if(!activeWelcome)return;renderWelcomeNotification();clearTimeout(welcomeVisibleTimer);welcomeVisibleTimer=setTimeout(()=>{activeWelcome=null;renderWelcomeNotification();if(WELCOME_DEBUG)console.debug("[welcome] dismissed");clearTimeout(welcomeGapTimer);welcomeGapTimer=setTimeout(showNextWelcome,WELCOME_GAP_MS)},WELCOME_VISIBLE_MS)}
 function notifyWelcome(payload){if(WELCOME_DEBUG)console.debug("[welcome] socket received",{sessionId:payload?.sessionId,userId:payload?.userId,displayName:payload?.displayName});if(!acceptsSessionEvent(state,payload)||!addWelcome(welcomeNotifications,payload))return;if(WELCOME_DEBUG)console.debug("[welcome] queued",{sessionId:payload.sessionId,userId:payload.userId});showNextWelcome()}
 function clearWelcomeNotifications(){clearTimeout(welcomeVisibleTimer);clearTimeout(welcomeGapTimer);activeWelcome=null;clearWelcomeStore(welcomeNotifications);renderWelcomeNotification()}
+async function pollDevTelemetry() {
+  if (!DEV_REMOTE || devTelemetryPollInFlight || !dashboardLoaded) return;
+  devTelemetryPollInFlight = true;
+  try {
+    const ready = await requestJson("/api/ready");
+    const collector = ready?.collector;
+    const sessionId = state.activeSession?.id;
+    const count = Number(collector?.memberReceivedCount);
+    const chatCount = Number(collector?.chatPersistedCount);
+    if (!sessionId || !Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(chatCount) || chatCount < 0) return;
+    if (memberBaselineSessionId !== sessionId || memberCountBaseline === null || count < memberCountBaseline) {
+      memberBaselineSessionId = sessionId;
+      memberCountBaseline = count;
+      chatCountBaseline = chatCount;
+      return;
+    }
+    const joined = count - memberCountBaseline;
+    memberCountBaseline = count;
+    const newChats = chatCountBaseline !== null && chatCount > chatCountBaseline;
+    chatCountBaseline = chatCount;
+    if (state.selectedSession?.id !== sessionId) return;
+    if (newChats) {
+      setTimeout(() => {
+        if (state.selectedSession?.id === sessionId) {
+          void syncDashboardState().catch(error => reportError(error, "Không đồng bộ được comment mới"));
+        }
+      }, 1_000);
+    }
+    if (joined && !collector.welcomeNotificationsEnabled && state.status?.state === "live") {
+      const lastJoinedAt = new Date(collector.lastMemberAt || 0).getTime();
+      if (Number.isFinite(lastJoinedAt) && Date.now() - lastJoinedAt <= 15_000) {
+        const payload = { sessionId, userId: `count:${count}`, displayName: joined === 1 ? "Một người xem mới" : `${joined} người xem mới`, hasQuestion: false, hasGift: false };
+        if (addWelcome(welcomeNotifications, payload)) showNextWelcome();
+      }
+    }
+  } catch (error) {
+    if (WELCOME_DEBUG) console.debug("[dev] telemetry unavailable", error?.message);
+  } finally { devTelemetryPollInFlight = false; }
+}
 function scheduleGiftStateRefresh(payload){if(payload?.questionId)pendingGiftHighlights.add(payload.questionId);if(giftRefreshTimer)return;giftRefreshTimer=setTimeout(async()=>{giftRefreshTimer=null;const selectedId=state.selectedSession?.id,highlights=[...pendingGiftHighlights];pendingGiftHighlights.clear();if(!selectedId)return;try{const data=await requestJson(`/api/state?sessionId=${encodeURIComponent(selectedId)}`);if(state.selectedSession?.id!==selectedId)return;state=normalizeDashboardPayload(data,state);render();for(const id of highlights)highlightThread(id)}catch(error){reportError(error,"Không đồng bộ được gift")}},75)}
 $('giftToasts').addEventListener('click',event=>{const close=event.target.closest('[data-dismiss-gift]');if(close){event.stopPropagation();removeGiftToast(close.dataset.dismissGift);return}const card=event.target.closest('[data-gift-toast]');if(!card)return;if(card.dataset.question)focusThread(card.dataset.question);else{state.tab='gifts';document.querySelectorAll('.tab').forEach(item=>item.classList.toggle('active',item.dataset.tab==='gifts'));updateSortOptions();renderQueue()}});
 
@@ -445,7 +497,13 @@ async function updateQuestionItemStatus(threadId, itemId, status) {
     });
     if (!payload || payload.id !== threadId) throw new Error("Server trả question update không đầy đủ");
     mergeQuestionUpdate(state, payload); clearError();
-    toast(status === "ANSWERED" ? "Đã trả câu này" : status === "SKIPPED" ? "Đã bỏ qua câu này" : "Câu hỏi đã trở lại hàng chờ");
+    const updatedThread = allQuestions().find(item => item.id === threadId);
+    const remaining = (updatedThread?.questionItems || []).filter(item => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(item.status)).length;
+    toast(status === "ANSWERED"
+      ? (remaining ? `Đã trả câu này · còn ${remaining} câu của người này` : "Đã trả câu này · đã rời hàng chờ")
+      : status === "SKIPPED"
+        ? (remaining ? `Đã bỏ qua câu này · còn ${remaining} câu của người này` : "Đã bỏ qua câu này · đã rời hàng chờ")
+        : "Câu hỏi đã trở lại hàng chờ");
     return true;
   } catch (error) {
     restoreQuestion(state, snapshot);
@@ -618,7 +676,7 @@ window.addEventListener("error", event => reportError(event.error || new Error(e
 window.addEventListener("unhandledrejection", event => reportError(event.reason, "Một thao tác chưa hoàn tất. Vui lòng thử lại."));
 
 updateSortOptions();
-syncDashboardState().then(() => { dashboardLoaded = true; socket.connect(); }).catch(error => reportError(error, "Không tải được dữ liệu dashboard"));
+syncDashboardState().then(() => { dashboardLoaded = true; socket.connect(); if (DEV_REMOTE) void pollDevTelemetry(); }).catch(error => reportError(error, "Không tải được dữ liệu dashboard"));
 socket.on("connect", () => { if (dashboardLoaded) void syncDashboardState().catch(error => reportError(error, "Đã kết nối lại nhưng chưa đồng bộ được comment mới")); });
 socket.on("connect_error", error => {
   if (String(error?.message || "").includes("UNAUTHORIZED")) {
@@ -647,6 +705,9 @@ socket.on("target:changing", payload => { state.status = { ...state.status, stat
 socket.on("target:changed", async payload => {
   clearGiftNotifications(giftNotifications);for(const timer of giftNotificationTimers.values())clearTimeout(timer);giftNotificationTimers.clear();renderGiftNotifications();
   clearWelcomeNotifications();
+  memberCountBaseline = null;
+  memberBaselineSessionId = null;
+  chatCountBaseline = null;
   state.target = { username: payload.username, displayUsername: `@${payload.username}` };
   state.activeSession = { id: payload.sessionId, targetUsername: payload.username, status: "connecting" };
   state.selectedSession = state.activeSession; state.comments = []; state.questions = []; state.users = [];
@@ -655,3 +716,4 @@ socket.on("target:changed", async payload => {
 });
 socket.on("target:error", payload => { reportError(new Error(payload?.message), payload?.message || "Không kết nối được tài khoản mới"); if ($("targetModal").open) { $("targetError").textContent = payload?.message || "Không kết nối được"; $("targetError").hidden = false; } });
 setInterval(renderViewerFreshness, 10_000);
+if (DEV_REMOTE) setInterval(() => void pollDevTelemetry(), 3_000);

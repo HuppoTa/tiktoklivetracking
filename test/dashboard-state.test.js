@@ -95,6 +95,24 @@ test("socket duplicate update idempotent và không tạo card trùng", () => {
   assert.equal(state.questions[0].repeatCount, 2);
 });
 
+test("payload socket cũ không làm câu đã trả xuất hiện lại", () => {
+  const state = initialDashboardState();
+  state.questions = [thread({
+    questionItems: [{ id: "i1", text: "Câu một", status: "ACTIVE", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" }],
+    activeQuestionId: "i1",
+    activeQuestion: { id: "i1", text: "Câu một", status: "ACTIVE" }
+  })];
+  setQuestionItemStatusLocally(state, "q1", "i1", "ANSWERED", "2026-01-01T00:02:00Z");
+  mergeQuestionUpdate(state, thread({
+    questionItems: [{ id: "i1", text: "Câu một", status: "ACTIVE", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:01:00Z" }],
+    answered: false,
+    activeQuestionId: "i1"
+  }));
+  assert.equal(state.questions[0].questionItems[0].status, "ANSWERED");
+  assert.equal(state.questions[0].answered, true);
+  assert.deepEqual(selectQuestions(state, { answered: false }), []);
+});
+
 test("state render chịu được payload thiếu array hoặc array rỗng", () => {
   const state = normalizeDashboardPayload({ questions: null, users: undefined, comments: [] });
   assert.deepEqual(state.questions, []);

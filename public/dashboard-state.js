@@ -15,6 +15,43 @@ export function initialDashboardState() {
 
 function array(value) { return Array.isArray(value) ? value : []; }
 
+function timestamp(value) {
+  const parsed = new Date(value || 0).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeQuestionItems(previousItems, incomingItems) {
+  const previousById = new Map(array(previousItems).map(item => [item?.id, item]));
+  return incomingItems.map(incoming => {
+    const previous = previousById.get(incoming?.id);
+    if (!previous) return incoming;
+    return timestamp(previous.updatedAt) > timestamp(incoming.updatedAt)
+      ? previous
+      : { ...previous, ...incoming };
+  });
+}
+
+function syncDerivedQuestionState(thread) {
+  const items = array(thread.questionItems);
+  const pending = items
+    .filter(item => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(item?.status))
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  const active = pending[0] || null;
+  for (const item of items) {
+    if (item.status === "ACTIVE" && item !== active) item.status = "WAITING";
+  }
+  if (active?.status === "WAITING") active.status = "ACTIVE";
+  thread.activeQuestionId = active?.id || null;
+  thread.activeQuestion = active ? { ...active } : null;
+  thread.answered = !active;
+  thread.answeredAt = active ? null : thread.answeredAt || items.map(item => item.answeredAt).filter(Boolean).sort().at(-1) || null;
+  if (active) {
+    thread.canonicalText = active.text || active.rawText || thread.canonicalText;
+    thread.normalizedText = active.normalizedText || thread.normalizedText;
+  }
+  return thread;
+}
+
 export function normalizeDashboardPayload(payload = {}, current = initialDashboardState()) {
   return {
     ...current,
@@ -42,12 +79,16 @@ export function mergeQuestionUpdate(state, payload) {
   const index = state.questions.findIndex(item => item?.id === payload.id);
   if (index >= 0) {
     const previous = state.questions[index] || {};
-    state.questions[index] = {
+    const merged = {
       ...previous,
       ...payload,
       occurrences: Array.isArray(payload.occurrences) ? payload.occurrences : array(previous.occurrences),
-      commentIds: Array.isArray(payload.commentIds) ? payload.commentIds : array(previous.commentIds)
+      commentIds: Array.isArray(payload.commentIds) ? payload.commentIds : array(previous.commentIds),
+      questionItems: Array.isArray(payload.questionItems)
+        ? mergeQuestionItems(previous.questionItems, payload.questionItems)
+        : previous.questionItems
     };
+    state.questions[index] = Array.isArray(payload.questionItems) ? syncDerivedQuestionState(merged) : merged;
   } else {
     if (typeof payload.userId !== "string" || typeof payload.canonicalText !== "string") return false;
     state.questions.push({ occurrences: [], commentIds: [], ...payload });
@@ -114,28 +155,17 @@ export function setQuestionItemStatusLocally(state, threadId, itemId, status, up
   item.answeredAt = status === "ANSWERED" ? updatedAt : null;
   item.skippedAt = status === "SKIPPED" ? updatedAt : null;
 
-  const pending = thread.questionItems
-    .filter(candidate => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(candidate.status))
-    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
-  const active = pending[0] || null;
-  for (const candidate of thread.questionItems) {
-    if (candidate.status === "ACTIVE" && candidate !== active) candidate.status = "WAITING";
-  }
-  if (active?.status === "WAITING") active.status = "ACTIVE";
-
-  thread.activeQuestionId = active?.id || null;
-  thread.activeQuestion = active ? { ...active } : null;
-  thread.answered = !active;
-  thread.answeredAt = thread.answered ? (thread.answeredAt || updatedAt) : null;
-  if (active) {
-    thread.canonicalText = active.text || active.rawText || thread.canonicalText;
-    thread.normalizedText = active.normalizedText || thread.normalizedText;
-  }
+  syncDerivedQuestionState(thread);
+  if (thread.answered && !thread.answeredAt) thread.answeredAt = updatedAt;
   return true;
 }
 
 export function restoreQuestion(state, snapshot) {
-  return snapshot ? mergeQuestionUpdate(state, snapshot) : false;
+  if (!snapshot?.id || !Array.isArray(state.questions)) return false;
+  const index = state.questions.findIndex(item => item?.id === snapshot.id);
+  if (index < 0) return false;
+  state.questions[index] = structuredClone(snapshot);
+  return true;
 }
 
 export function selectQuestions(state, { answered, search = "", sort = "queue", minutes = 0 } = {}) {

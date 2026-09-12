@@ -180,10 +180,12 @@ export class QuestionService {
   setThreadAnswered(threadId, answered, now = new Date()) {
     const thread = this.store.questionThreads.find(item => item.id === threadId);
     if (!thread) return null;
+    const updatedAt = now.toISOString();
     for (const item of this.normalizeQuestionItems(thread)) {
-      if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = now.toISOString(); }
-      if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; }
+      if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = updatedAt; item.updatedAt = updatedAt; }
+      if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; item.updatedAt = updatedAt; }
     }
+    thread.updatedAt = updatedAt;
     this.syncThreadQuestionState(thread, now);
     return thread;
   }
@@ -199,6 +201,7 @@ export class QuestionService {
     item.answeredAt = status === "ANSWERED" ? now.toISOString() : null;
     item.skippedAt = status === "SKIPPED" ? now.toISOString() : null;
     if (status === "WAITING") { item.answeredAt = null; item.skippedAt = null; }
+    thread.updatedAt = now.toISOString();
     this.syncThreadQuestionState(thread, now);
     return thread;
   }
@@ -208,9 +211,10 @@ export class QuestionService {
     const answeredAt = answered ? now.toISOString() : null;
     for (const thread of threads) {
       for (const item of this.normalizeQuestionItems(thread)) {
-        if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = answeredAt; }
-        if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; }
+        if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = answeredAt; item.updatedAt = now.toISOString(); }
+        if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; item.updatedAt = now.toISOString(); }
       }
+      thread.updatedAt = now.toISOString();
       this.syncThreadQuestionState(thread, now);
     }
     return threads;
