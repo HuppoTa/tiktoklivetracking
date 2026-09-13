@@ -1,7 +1,7 @@
 import {
-  acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeQuestionUpdate, mergeUserUpdate,
+  acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeCommentUpdate, mergeQuestionUpdate, mergeUserUpdate,
   mergeViewerUpdate, normalizeDashboardPayload, restoreQuestion, selectQuestions,
-  setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
+  pendingCommentIds, setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
 } from "./dashboard-state.js";
 import { normalizeTargetInput } from "./target-input.js";
 import { addGiftNotification, clearGiftNotifications, createGiftNotificationStore, dismissGiftNotification } from "./gift-notifications.js";
@@ -32,6 +32,7 @@ let livePatchFrame = null;
 let queuePatchFrame = null;
 let statsPatchFrame = null;
 const pendingThreads = new Set();
+const realtimeTelemetry = globalThis.__LIVE_TELEMETRY__ ||= { comments: [], tasks: [] };
 const pendingUsers = new Set();
 const giftNotifications=createGiftNotificationStore({maxVisible:4}),giftNotificationTimers=new Map(),giftHighlights=new Map();
 let giftRefreshTimer = null;
@@ -185,7 +186,14 @@ function patchQueueThread(threadId) {
   const thread = expected.find(item => item.id === threadId);
   const selector = `[data-thread-id="${CSS.escape(threadId)}"]`;
   const existing = root.querySelector(selector);
-  if (!thread) { existing?.remove(); return expected.length > 0; }
+  if (!thread) {
+    existing?.remove();
+    if (!expected.length) {
+      const empty = emptyStateFor(state.tab);
+      root.innerHTML = `<div class="empty"><b>${esc(empty.title)}</b><span>${esc(empty.detail)}</span></div>`;
+    }
+    return true;
+  }
   const index = expected.findIndex(item => item.id === threadId);
   const card = cardFromHtml(safeQuestionCard({ ...thread, _queueLeader: index === 0 }));
   if (existing) existing.replaceWith(card);
@@ -224,19 +232,36 @@ function scheduleLiveCommentPatch(comment) {
   livePatchFrame = requestAnimationFrame(() => {
     livePatchFrame = null;
     const root = $("comments");
-    const linked = new Set(allQuestions().flatMap(item => item.commentIds || []));
+    const linked = pendingCommentIds(state);
     for (const item of pendingLiveComments.values()) {
       if (!acceptsSessionEvent(state, item)) continue;
       const selector = `[data-comment-id="${CSS.escape(item.id)}"]`;
       const existing = root.querySelector(selector);
+      const visible = state.comments.slice(-visibleCommentCount).reverse();
+      const position = visible.findIndex(candidate => candidate.id === item.id);
+      if (position < 0) { existing?.remove(); continue; }
       const card = cardFromHtml(commentCard(item, linked));
       if (existing) existing.replaceWith(card);
-      else { root.querySelector(".empty")?.remove(); root.prepend(card); }
+      else {
+        root.querySelector(".empty")?.remove();
+        const predecessor = visible.slice(0, position).reverse()
+          .map(candidate => root.querySelector(`[data-comment-id="${CSS.escape(candidate.id)}"]`)).find(Boolean);
+        if (predecessor) predecessor.insertAdjacentElement("afterend", card);
+        else root.prepend(card);
+      }
     }
     pendingLiveComments.clear();
     while (root.children.length > Math.min(visibleCommentCount, state.comments.length)) root.lastElementChild?.remove();
     updateCommentVisibility();
   });
+}
+
+function patchThreadComments(threadId) {
+  const thread = allQuestions().find(item => item.id === threadId);
+  for (const commentId of thread?.commentIds || []) {
+    const comment = state.comments.find(item => item.id === commentId);
+    if (comment) scheduleLiveCommentPatch(comment);
+  }
 }
 
 function scheduleStatsPatch() {
@@ -300,7 +325,7 @@ function renderViewerFreshness() {
 
 function renderComments() {
   const comments = Array.isArray(state.comments) ? state.comments : [];
-  const linked = new Set(allQuestions().flatMap(item => item.commentIds || []));
+  const linked = pendingCommentIds(state);
   const visible = comments.slice(-visibleCommentCount);
   $("comments").innerHTML = visible.reverse().map(comment => commentCard(comment, linked)).join("") || '<div class="empty"><b>Chưa có comment</b></div>';
   updateCommentVisibility();
@@ -522,13 +547,16 @@ async function updateThreadAnswered(id, answered, { showFeedback = true } = {}) 
 async function updateQuestionItemStatus(threadId, itemId, status) {
   if (!threadId || !itemId || pendingThreads.has(threadId)) return false;
   const snapshot = snapshotQuestion(state, threadId);
-  if (!snapshot || !setQuestionItemStatusLocally(state, threadId, itemId, status)) {
+  const idempotencyKey = `task:${threadId}:${itemId}:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+  const interactionAt = new Date().toISOString();
+  if (!snapshot || !setQuestionItemStatusLocally(state, threadId, itemId, status, interactionAt, idempotencyKey)) {
     toast("Không tìm thấy câu hỏi"); return false;
   }
-  pendingThreads.add(threadId); renderStats(); renderQueue();
+  pendingThreads.add(threadId); renderStats(); patchQueueThread(threadId); patchThreadComments(threadId);
+  requestAnimationFrame(() => { realtimeTelemetry.tasks.push({ taskId:itemId, eventType:"task.optimistic", interactionAt, uiCommittedAt:new Date().toISOString() }); if(realtimeTelemetry.tasks.length>100)realtimeTelemetry.tasks.shift(); });
   try {
     const payload = await requestJson(`/api/questions/${encodeURIComponent(threadId)}/items/${encodeURIComponent(itemId)}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, sessionId: state.selectedSession?.id })
+      method: "PATCH", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ status, sessionId: state.selectedSession?.id, idempotencyKey })
     });
     if (!payload || payload.id !== threadId) throw new Error("Server trả question update không đầy đủ");
     mergeQuestionUpdate(state, payload); clearError();
@@ -541,9 +569,41 @@ async function updateQuestionItemStatus(threadId, itemId, status) {
         : "Câu hỏi đã trở lại hàng chờ");
     return true;
   } catch (error) {
-    restoreQuestion(state, snapshot);
+    try {
+      const authoritative = await requestJson(`/api/questions/${encodeURIComponent(threadId)}/items/${encodeURIComponent(itemId)}?sessionId=${encodeURIComponent(state.selectedSession?.id || "")}`);
+      mergeQuestionUpdate(state, authoritative);
+      if (authoritative.taskId === itemId && authoritative.status === status) { clearError(); toast(status === "ANSWERED" ? "Đã trả câu này" : status === "SKIPPED" ? "Đã bỏ qua câu này" : "Câu hỏi đã trở lại hàng chờ"); return true; }
+      if (error.status) restoreQuestion(state, snapshot, idempotencyKey);
+      else {
+        const sessionId = state.selectedSession?.id;
+        setTimeout(() => void (async () => {
+          if (state.selectedSession?.id !== sessionId) return;
+          try {
+            const retry = await requestJson(`/api/questions/${encodeURIComponent(threadId)}/items/${encodeURIComponent(itemId)}`, {
+              method: "PATCH", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+              body: JSON.stringify({ status, sessionId, idempotencyKey })
+            });
+            mergeQuestionUpdate(state, retry); clearError();
+          } catch (retryError) {
+            try {
+              const latest = await requestJson(`/api/questions/${encodeURIComponent(threadId)}/items/${encodeURIComponent(itemId)}?sessionId=${encodeURIComponent(sessionId || "")}`);
+              mergeQuestionUpdate(state, latest);
+              if (retryError.status && latest.status !== status) {
+                restoreQuestion(state, snapshot, idempotencyKey);
+                toast(`Không thể cập nhật: ${retryError.message}`);
+              }
+            } catch { /* Chưa thể xác định commit; giữ optimistic state cho lần đồng bộ kế tiếp. */ }
+          }
+          renderStats(); patchQueueThread(threadId); patchThreadComments(threadId);
+        })(), 1_500);
+        reportError(error, "Kết nối gián đoạn; đang đối soát trạng thái câu hỏi với server"); toast("Kết nối gián đoạn · hệ thống đang xác minh trạng thái"); return false;
+      }
+    } catch {
+      setTimeout(() => void syncDashboardState().catch(() => {}), 1_500);
+      reportError(error, "Kết nối gián đoạn; đang đối soát trạng thái câu hỏi với server"); toast("Kết nối gián đoạn · hệ thống đang xác minh trạng thái"); return false;
+    }
     reportError(error, `Không cập nhật được câu hỏi: ${error.message}`); toast(`Không thể cập nhật: ${error.message}`); return false;
-  } finally { pendingThreads.delete(threadId); renderStats(); renderQueue(); }
+  } finally { pendingThreads.delete(threadId); renderStats(); patchQueueThread(threadId); patchThreadComments(threadId); }
 }
 
 async function updateUserAnswered(userId, answered) {
@@ -720,9 +780,10 @@ socket.on("connect_error", error => {
   }
 });
 socket.on("status", value => { if (value && typeof value === "object") state.status = { ...state.status, ...value }; renderStatus(); });
-socket.on("comment", comment => { if (!acceptsSessionEvent(state, comment)) return; if (comment?.id && !(state.comments || []).some(item => item?.id === comment.id && item?.sessionId === comment.sessionId)) state.comments.push(comment); scheduleStatsPatch(); scheduleLiveCommentPatch(comment); });
-socket.on("question:created", thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) { scheduleStatsPatch(); scheduleQueuePatch([thread.id]); scheduleLiveCommentPatch((state.comments || []).find(item => item.id === thread.commentIds?.at(-1))); } });
-socket.on("question:updated", thread => { if (!acceptsSessionEvent(state, thread) || !mergeQuestionUpdate(state, thread)) return; if(thread.giftEventId)scheduleGiftStateRefresh(thread);else{scheduleStatsPatch();scheduleQueuePatch([thread.id]);scheduleLiveCommentPatch((state.comments || []).find(item => item.id === thread.commentIds?.at(-1)));} });
+socket.on("comment", comment => { if (!acceptsSessionEvent(state, comment) || !mergeCommentUpdate(state, comment)) return; const frontendReceivedAt=new Date().toISOString();scheduleStatsPatch();scheduleLiveCommentPatch(comment);requestAnimationFrame(()=>{realtimeTelemetry.comments.push({liveSessionId:comment.sessionId,commentId:comment.id,eventId:comment.eventId||comment.id,sourceTimestamp:comment.eventTimestamp||null,receivedAt:comment.receivedAt||null,persistedAt:comment.persistedAt||null,publishedAt:comment.publishedAt||null,frontendReceivedAt,uiCommittedAt:new Date().toISOString(),eventType:"comment.rendered"});if(realtimeTelemetry.comments.length>100)realtimeTelemetry.comments.shift()}); });
+socket.on("question:created", thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) { scheduleStatsPatch(); scheduleQueuePatch([thread.id]); patchThreadComments(thread.id); } });
+socket.on("question:updated", thread => { if (!acceptsSessionEvent(state, thread) || !mergeQuestionUpdate(state, thread)) return; if(thread.giftEventId)scheduleGiftStateRefresh(thread);else{scheduleStatsPatch();scheduleQueuePatch([thread.id]);patchThreadComments(thread.id);} });
+socket.on("task:updated", thread => { if (!acceptsSessionEvent(state, thread) || !mergeQuestionUpdate(state, thread)) return; scheduleStatsPatch(); scheduleQueuePatch([thread.id]); patchThreadComments(thread.id); });
 for (const eventName of ["question:manually-created","question:promoted","question:priority-updated"]) socket.on(eventName, thread => { if (acceptsSessionEvent(state, thread) && mergeQuestionUpdate(state, thread)) { scheduleStatsPatch(); scheduleQueuePatch([thread.id]); } });
 socket.on("user:updated", user => { if (acceptsSessionEvent(state, user) && mergeUserUpdate(state, user)) { scheduleStatsPatch(); scheduleQueuePatch(allQuestions().filter(thread => thread.userId === user.userId).map(thread => thread.id)); } });
 socket.on("viewer:updated", viewers => { if (acceptsSessionEvent(state, viewers) && mergeViewerUpdate(state, viewers)) renderStats(); });

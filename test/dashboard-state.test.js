@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeQuestionUpdate, mergeViewerUpdate,
+  acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeCommentUpdate, mergeQuestionUpdate, mergeViewerUpdate,
   normalizeDashboardPayload, restoreQuestion, selectQuestions,
-  setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
+  pendingCommentIds, setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
 } from "../public/dashboard-state.js";
 
 function thread(overrides = {}) {
@@ -136,4 +136,49 @@ test("LIKE socket update merge tổng TikTok mà không làm mất viewer hiện
   assert.equal(state.analytics.viewers.peak, 12);
   assert.equal(state.analytics.viewers.totalLikes, 135);
   assert.equal(state.analytics.viewers.lastLikeUpdateAt, "2026-01-01T00:01:00Z");
+});
+
+test("comment replay upsert theo event ID và comment giống nhau khác ID vẫn giữ riêng", () => {
+  const state = initialDashboardState(); state.selectedSession = { id:"s1" };
+  const first = { id:"m1", eventId:"m1", sessionId:"s1", text:"giống nhau", sequence:2 };
+  mergeCommentUpdate(state, first); mergeCommentUpdate(state, { ...first, nickname:"Bản mới" });
+  mergeCommentUpdate(state, { ...first, id:"m2", eventId:"m2", sequence:1 });
+  assert.deepEqual(state.comments.map(item => item.id), ["m2", "m1"]);
+  assert.equal(state.comments[1].nickname, "Bản mới");
+});
+
+test("realtime đến trước snapshot cũ không bị snapshot xóa hoặc resurrect terminal task", () => {
+  let state = initialDashboardState(); state.selectedSession = { id:"s1" }; state.revision = 4;
+  state.questions = [thread({ sessionId:"s1", questionItems:[{ id:"i1", text:"Câu", status:"ACTIVE", version:1, updatedAt:"2026-01-01T00:00:00Z" }] })];
+  mergeCommentUpdate(state, { id:"m2", eventId:"m2", sessionId:"s1", sequence:2, revision:5 });
+  setQuestionItemStatusLocally(state, "q1", "i1", "ANSWERED", "2026-01-01T00:02:00Z", "mutation-1");
+  state = normalizeDashboardPayload({ revision:4, selectedSession:{id:"s1"}, comments:[], questions:[thread({sessionId:"s1",questionItems:[{id:"i1",text:"Câu",status:"ACTIVE",version:1,updatedAt:"2026-01-01T00:00:00Z"}]})] }, state);
+  assert.deepEqual(state.comments.map(item => item.id), ["m2"]);
+  assert.equal(state.questions[0].questionItems[0].status, "ANSWERED");
+});
+
+test("API response và realtime event cùng version kết thúc optimistic state idempotently", () => {
+  const state=initialDashboardState();state.selectedSession={id:"s1"};state.questions=[thread({sessionId:"s1",questionItems:[{id:"i1",text:"Câu",status:"ACTIVE",version:1,updatedAt:"2026-01-01T00:00:00Z"}]})];
+  setQuestionItemStatusLocally(state,"q1","i1","SKIPPED","2026-01-01T00:02:00Z","mutation-2");
+  const payload=thread({sessionId:"s1",revision:2,questionItems:[{id:"i1",text:"Câu",status:"SKIPPED",version:2,updatedAt:"2026-01-01T00:02:00Z",lastMutationKey:"mutation-2"}]});
+  mergeQuestionUpdate(state,payload);mergeQuestionUpdate(state,payload);
+  assert.equal(state.questions[0].questionItems[0]._optimistic,false);
+  assert.equal(state.questions[0].answered,true);
+  assert.deepEqual([...pendingCommentIds(state)],[]);
+});
+
+test("rollback chỉ áp dụng cho mutation đang chờ, không ghi đè update authoritative", () => {
+  const state=initialDashboardState();state.questions=[thread({questionItems:[{id:"i1",text:"Câu",commentIds:["m1"],status:"ACTIVE",version:1}]})];
+  const before=snapshotQuestion(state,"q1");setQuestionItemStatusLocally(state,"q1","i1","ANSWERED","2026-01-01T00:02:00Z","old-key");
+  mergeQuestionUpdate(state,thread({questionItems:[{id:"i1",text:"Câu",commentIds:["m1"],status:"ANSWERED",version:3,updatedAt:"2026-01-01T00:03:00Z",lastMutationKey:"server-key"}]}));
+  assert.equal(restoreQuestion(state,before,"old-key"),false);
+  assert.equal(state.questions[0].questionItems[0].status,"ANSWERED");
+});
+
+test("task terminal cùng version không hồi sinh dù event cũ có timestamp mới hơn", () => {
+  const state = initialDashboardState();
+  state.questions = [thread({ questionItems: [{ id: "i1", text: "Câu", status: "ANSWERED", version: 2, updatedAt: "2026-01-01T00:01:00Z" }] })];
+  mergeQuestionUpdate(state, thread({ questionItems: [{ id: "i1", text: "Câu", status: "WAITING", version: 2, updatedAt: "2026-01-01T00:03:00Z" }] }));
+  assert.equal(state.questions[0].questionItems[0].status, "ANSWERED");
+  assert.deepEqual(selectQuestions(state, { answered: false }), []);
 });

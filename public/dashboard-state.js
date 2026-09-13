@@ -1,5 +1,6 @@
 export function initialDashboardState() {
   return {
+    revision: 0,
     comments: [], questions: [], users: [], gifts: [], giftAttention: [], giftSettings: {},
     target: { username: "kathyuyen.ta", displayUsername: "@kathyuyen.ta" },
     settings: { recentTargets: ["kathyuyen.ta"], questionDebug: false }, activeSession: null, selectedSession: null, sessions: [],
@@ -20,15 +21,51 @@ function timestamp(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+const terminalStatus = status => ["ANSWERED", "SKIPPED"].includes(status);
+const numericVersion = value => Number.isSafeInteger(Number(value)) ? Number(value) : 0;
+
+function chooseQuestionItem(previous, incoming) {
+  if (!previous) return incoming;
+  const previousVersion = numericVersion(previous.version);
+  const incomingVersion = numericVersion(incoming?.version);
+  if (incomingVersion < previousVersion) return previous;
+  if (incomingVersion === previousVersion && terminalStatus(previous.status) && !terminalStatus(incoming?.status)) return previous;
+  if (incomingVersion === previousVersion) {
+    if (previous._optimistic && incoming?.lastMutationKey !== previous._mutationKey) return previous;
+    const previousTime = timestamp(previous.updatedAt);
+    const incomingTime = timestamp(incoming?.updatedAt);
+    if (incomingTime < previousTime) return previous;
+  }
+  return { ...previous, ...incoming, _optimistic: false, _mutationKey: null };
+}
+
 function mergeQuestionItems(previousItems, incomingItems) {
   const previousById = new Map(array(previousItems).map(item => [item?.id, item]));
   return incomingItems.map(incoming => {
     const previous = previousById.get(incoming?.id);
     if (!previous) return incoming;
-    return timestamp(previous.updatedAt) > timestamp(incoming.updatedAt)
-      ? previous
-      : { ...previous, ...incoming };
+    return chooseQuestionItem(previous, incoming);
   });
+}
+
+function compareComments(a, b) {
+  const sequenceA = Number(a?.sequence), sequenceB = Number(b?.sequence);
+  if (Number.isSafeInteger(sequenceA) && Number.isSafeInteger(sequenceB) && sequenceA !== sequenceB) return sequenceA - sequenceB;
+  const time = timestamp(a?.eventTimestamp || a?.receivedAt || a?.timestamp) - timestamp(b?.eventTimestamp || b?.receivedAt || b?.timestamp);
+  return time || String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
+export function mergeCommentUpdate(state, payload) {
+  if (!payload?.id || !payload?.sessionId) return false;
+  if (!Array.isArray(state.comments)) state.comments = [];
+  const index = state.comments.findIndex(item => item?.id === payload.id && item?.sessionId === payload.sessionId);
+  const merged = index < 0 ? payload : { ...state.comments[index], ...payload };
+  if (index >= 0) state.comments.splice(index, 1);
+  let low = 0, high = state.comments.length;
+  while (low < high) { const middle = (low + high) >>> 1; if (compareComments(state.comments[middle], merged) <= 0) low = middle + 1; else high = middle; }
+  state.comments.splice(low, 0, merged);
+  state.revision = Math.max(numericVersion(state.revision), numericVersion(payload.revision));
+  return true;
 }
 
 function syncDerivedQuestionState(thread) {
@@ -53,17 +90,31 @@ function syncDerivedQuestionState(thread) {
 }
 
 export function normalizeDashboardPayload(payload = {}, current = initialDashboardState()) {
+  const selectedSession = payload.selectedSession && typeof payload.selectedSession === "object" ? payload.selectedSession : (payload.activeSession && typeof payload.activeSession === "object" ? payload.activeSession : current.selectedSession);
+  const sameSession = Boolean(selectedSession?.id && selectedSession.id === current.selectedSession?.id);
+  const incomingRevision = numericVersion(payload.revision);
+  const currentRevision = numericVersion(current.revision);
+  const staleSnapshot = sameSession && incomingRevision < currentRevision;
+  const incomingQuestions = array(payload.questions);
+  const previousById = new Map(array(current.questions).map(item => [item?.id, item]));
+  const questions = staleSnapshot ? array(current.questions) : incomingQuestions.map(item => {
+    const previous = previousById.get(item?.id);
+    if (!previous) return item;
+    const merged = { ...previous, ...item, questionItems: mergeQuestionItems(previous.questionItems, array(item.questionItems)) };
+    return syncDerivedQuestionState(merged);
+  });
   return {
     ...current,
+    revision: Math.max(currentRevision, incomingRevision),
     target: payload.target && typeof payload.target === "object" ? { ...current.target, ...payload.target } : current.target,
     settings: payload.settings && typeof payload.settings === "object" ? { ...current.settings, ...payload.settings } : current.settings,
     activeSession: payload.activeSession && typeof payload.activeSession === "object" ? payload.activeSession : null,
-    selectedSession: payload.selectedSession && typeof payload.selectedSession === "object" ? payload.selectedSession : (payload.activeSession && typeof payload.activeSession === "object" ? payload.activeSession : current.selectedSession),
+    selectedSession,
     sessions: array(payload.sessions),
     status: payload.status && typeof payload.status === "object" ? { ...current.status, ...payload.status } : current.status,
-    comments: array(payload.comments),
-    questions: array(payload.questions),
-    users: array(payload.users),
+    comments: staleSnapshot ? array(current.comments) : array(payload.comments).sort(compareComments),
+    questions,
+    users: staleSnapshot ? array(current.users) : array(payload.users),
     gifts: array(payload.gifts), giftAttention: array(payload.giftAttention), giftSettings: payload.giftSettings || current.giftSettings,
     analytics: payload.analytics && typeof payload.analytics === "object" ? {
       questions: { ...current.analytics.questions, ...(payload.analytics.questions || {}) },
@@ -76,6 +127,7 @@ export function normalizeDashboardPayload(payload = {}, current = initialDashboa
 export function mergeQuestionUpdate(state, payload) {
   if (!payload || typeof payload.id !== "string" || !payload.id) return false;
   if (!Array.isArray(state.questions)) state.questions = [];
+  state.revision = Math.max(numericVersion(state.revision), numericVersion(payload.revision));
   const index = state.questions.findIndex(item => item?.id === payload.id);
   if (index >= 0) {
     const previous = state.questions[index] || {};
@@ -143,7 +195,7 @@ export function setQuestionAnsweredLocally(state, id, answered, answeredAt = new
   return mergeQuestionUpdate(state, { id, answered, answeredAt: answered ? answeredAt : null });
 }
 
-export function setQuestionItemStatusLocally(state, threadId, itemId, status, updatedAt = new Date().toISOString()) {
+export function setQuestionItemStatusLocally(state, threadId, itemId, status, updatedAt = new Date().toISOString(), mutationKey = null) {
   if (!["ANSWERED", "SKIPPED", "WAITING"].includes(status)) return false;
   const thread = array(state.questions).find(candidate => candidate?.id === threadId);
   if (!thread || !Array.isArray(thread.questionItems)) return false;
@@ -154,18 +206,28 @@ export function setQuestionItemStatusLocally(state, threadId, itemId, status, up
   item.updatedAt = updatedAt;
   item.answeredAt = status === "ANSWERED" ? updatedAt : null;
   item.skippedAt = status === "SKIPPED" ? updatedAt : null;
+  item.version = Math.max(1, numericVersion(item.version)) + 1;
+  item._optimistic = true;
+  item._mutationKey = mutationKey;
 
   syncDerivedQuestionState(thread);
   if (thread.answered && !thread.answeredAt) thread.answeredAt = updatedAt;
   return true;
 }
 
-export function restoreQuestion(state, snapshot) {
+export function restoreQuestion(state, snapshot, mutationKey = null) {
   if (!snapshot?.id || !Array.isArray(state.questions)) return false;
   const index = state.questions.findIndex(item => item?.id === snapshot.id);
   if (index < 0) return false;
+  if (mutationKey && !array(state.questions[index]?.questionItems).some(item => item?._mutationKey === mutationKey)) return false;
   state.questions[index] = structuredClone(snapshot);
   return true;
+}
+
+export function pendingCommentIds(state) {
+  return new Set(array(state.questions).flatMap(thread => array(thread?.questionItems)
+    .filter(item => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(item?.status))
+    .flatMap(item => array(item.commentIds))));
 }
 
 export function selectQuestions(state, { answered, search = "", sort = "queue", minutes = 0 } = {}) {
