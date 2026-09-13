@@ -154,3 +154,32 @@ test("lọc chưa trả dựa answered boolean và bỏ deleted", () => {
   a.answered = false; a.answeredAt = "2026-01-01T01:00:00Z"; b.deleted = true;
   assert.deepEqual(service.getQuestions({ sessionId: "session-a", answered: false }).map(item => item.id), [a.id]);
 });
+
+test("answer/skip idempotent và hai tab không thể đổi terminal state của nhau", () => {
+  const { service }=setup();const thread=service.addComment(comment("m1","u1","Công việc sắp tới thế nào?")).thread;const item=thread.questionItems[0];
+  const first=service.transitionQuestionItem(thread.id,item.id,"ANSWERED",new Date("2026-01-01T00:01:00Z"),{idempotencyKey:"tab-a"});
+  const retry=service.transitionQuestionItem(thread.id,item.id,"ANSWERED",new Date("2026-01-01T00:02:00Z"),{idempotencyKey:"tab-a"});
+  const competing=service.transitionQuestionItem(thread.id,item.id,"SKIPPED",new Date("2026-01-01T00:03:00Z"),{idempotencyKey:"tab-b"});
+  const current=service.enrichThread(thread).questionItems[0];assert.equal(first.item.status,"ANSWERED");assert.equal(retry.idempotent,true);assert.equal(competing.conflict,true);assert.equal(current.status,"ANSWERED");assert.equal(current.version,2);
+});
+
+test("terminal task chỉ trở lại waiting qua explicit undo có version mới", () => {
+  const { service }=setup();const thread=service.addComment(comment("m1","u1","Công việc sắp tới thế nào?")).thread;const item=thread.questionItems[0];
+  service.transitionQuestionItem(thread.id,item.id,"SKIPPED",new Date("2026-01-01T00:01:00Z"),{idempotencyKey:"skip"});
+  service.transitionQuestionItem(thread.id,item.id,"WAITING",new Date("2026-01-01T00:02:00Z"),{idempotencyKey:"undo"});
+  const current=service.enrichThread(thread).questionItems[0];assert.equal(current.status,"ACTIVE");assert.equal(current.version,3);assert.equal(thread.answered,false);
+});
+
+test("bulk user answer tăng item version để snapshot cũ không hồi sinh task", () => {
+  const { service } = setup();
+  const thread = service.addComment(comment("m1", "u1", "Công việc sắp tới thế nào?")).thread;
+  const taskId = thread.questionItems[0].id;
+  service.setUserAnswered("u1", true, new Date("2026-01-01T00:01:00Z"), "session-a");
+  const answered = service.enrichThread(thread).questionItems.find(item => item.id === taskId);
+  assert.equal(answered.status, "ANSWERED");
+  assert.equal(answered.version, 2);
+  service.setUserAnswered("u1", false, new Date("2026-01-01T00:02:00Z"), "session-a");
+  const undone = service.enrichThread(thread).questionItems.find(item => item.id === taskId);
+  assert.equal(undone.status, "ACTIVE");
+  assert.equal(undone.version, 3);
+});

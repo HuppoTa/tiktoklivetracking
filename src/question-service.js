@@ -39,6 +39,7 @@ export class QuestionService {
       status: thread.answered ? "ANSWERED" : "WAITING",
       answeredAt: thread.answered ? thread.answeredAt || null : null,
       skippedAt: null,
+      version: Math.max(1, Number(thread.version) || 1),
       needsReview: Boolean(thread.needsReview)
     };
     thread.questionItems = (Array.isArray(thread.questionItems) && thread.questionItems.length ? thread.questionItems : [legacy])
@@ -48,11 +49,12 @@ export class QuestionService {
         lastAskedAt: item.lastAskedAt || item.updatedAt || item.createdAt || legacy.lastAskedAt,
         status: item.status || (thread.answered ? "ANSWERED" : (item.needsReview ? "NEEDS_REVIEW" : "WAITING")),
         answeredAt: item.answeredAt || (thread.answered ? thread.answeredAt || null : null), skippedAt: item.skippedAt || null,
-        needsReview: Boolean(item.needsReview ?? thread.needsReview) }));
+        needsReview: Boolean(item.needsReview ?? thread.needsReview), version: Math.max(1, Number(item.version) || 1) }));
     return thread.questionItems;
   }
 
   syncThreadQuestionState(thread, now = new Date()) {
+    thread.version = Math.max(1, Number(thread.version) || 1);
     const items = this.normalizeQuestionItems(thread);
     const pending = items.filter(item => ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(item.status));
     const active = pending.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))[0] || null;
@@ -76,6 +78,13 @@ export class QuestionService {
     if (this.store.comments.some(item => item.id === comment.id && item.sessionId === comment.sessionId)) {
       return { duplicateMessage: true, comment: null, thread: null, threadCreated: false };
     }
+    const session = this.session(comment.sessionId);
+    if (session) {
+      const existingSequence = Number(comment.sequence);
+      comment.sequence = Number.isSafeInteger(existingSequence) && existingSequence > 0
+        ? existingSequence : Math.max(1, Number(session.nextCommentSequence) || 1);
+      session.nextCommentSequence = Math.max(Number(session.nextCommentSequence) || 1, comment.sequence + 1);
+    }
     this.store.comments.push(comment);
     if (!comment.question) return { duplicateMessage: false, comment, thread: null, threadCreated: false };
 
@@ -86,12 +95,12 @@ export class QuestionService {
       let item = null; let best = -1;
       for (const candidate of thread.questionItems) { const result = classifySimilarity(comment.normalizedText, candidate.normalizedText); if (result.kind === "duplicate" && result.score > best) { item = candidate; best = result.score; } }
       const isNewQuestion = !item;
-      if (!item) { item = { id: `qi-${randomUUID()}`, text: comment.text, rawText: comment.text, normalizedText: comment.normalizedText, commentIds: [], repeatCount: 0, createdAt: comment.timestamp, updatedAt: comment.timestamp, lastAskedAt: comment.timestamp, status: comment.needsReview ? "NEEDS_REVIEW" : "WAITING", answeredAt: null, skippedAt: null, needsReview: Boolean(comment.needsReview) }; thread.questionItems.push(item); }
+      if (!item) { item = { id: `qi-${randomUUID()}`, text: comment.text, rawText: comment.text, normalizedText: comment.normalizedText, commentIds: [], repeatCount: 0, createdAt: comment.timestamp, updatedAt: comment.timestamp, lastAskedAt: comment.timestamp, status: comment.needsReview ? "NEEDS_REVIEW" : "WAITING", answeredAt: null, skippedAt: null, needsReview: Boolean(comment.needsReview), version: 1 }; thread.questionItems.push(item); }
       if (!item.commentIds.includes(comment.id)) item.commentIds.push(comment.id);
-      item.repeatCount = item.commentIds.length; item.lastAskedAt = comment.timestamp; item.updatedAt = comment.timestamp;
+      item.repeatCount = item.commentIds.length; item.lastAskedAt = comment.timestamp; item.updatedAt = comment.timestamp; item.version = Math.max(1, Number(item.version) || 1) + 1;
       if (!thread.commentIds.includes(comment.id)) thread.commentIds.push(comment.id);
       thread.repeatCount = thread.commentIds.length; thread.lastAskedAt = comment.timestamp; thread.username = comment.username; thread.nickname = comment.nickname; thread.avatar = comment.avatar;
-      thread.updatedAt = comment.timestamp;
+      thread.updatedAt = comment.timestamp; thread.version = Math.max(1, Number(thread.version) || 1) + 1;
       if (isNewQuestion && thread.answered) thread.answerHistory ||= [], thread.answerHistory.push({ answeredAt: thread.answeredAt, reopenedAt: comment.timestamp });
       this.syncThreadQuestionState(thread, new Date(comment.timestamp));
       return { duplicateMessage: false, comment, thread, threadCreated: false };
@@ -114,7 +123,8 @@ export class QuestionService {
       createdAt: comment.timestamp,
       lastAskedAt: comment.timestamp,
       possibleDuplicate: null,
-      questionItems: [{ id: `qi-${randomUUID()}`, text: comment.text, rawText: comment.text, normalizedText: comment.normalizedText, commentIds: [comment.id], repeatCount: 1, createdAt: comment.timestamp, updatedAt: comment.timestamp, lastAskedAt: comment.timestamp, status: comment.needsReview ? "NEEDS_REVIEW" : "ACTIVE", answeredAt: null, skippedAt: null, needsReview: Boolean(comment.needsReview) }],
+      questionItems: [{ id: `qi-${randomUUID()}`, text: comment.text, rawText: comment.text, normalizedText: comment.normalizedText, commentIds: [comment.id], repeatCount: 1, createdAt: comment.timestamp, updatedAt: comment.timestamp, lastAskedAt: comment.timestamp, status: comment.needsReview ? "NEEDS_REVIEW" : "ACTIVE", answeredAt: null, skippedAt: null, needsReview: Boolean(comment.needsReview), version: 1 }],
+      version: 1,
       ...this.queueFields(comment)
     };
     this.syncThreadQuestionState(createdThread, new Date(comment.timestamp));
@@ -182,28 +192,43 @@ export class QuestionService {
     if (!thread) return null;
     const updatedAt = now.toISOString();
     for (const item of this.normalizeQuestionItems(thread)) {
-      if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = updatedAt; item.updatedAt = updatedAt; }
-      if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; item.updatedAt = updatedAt; }
+      if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = updatedAt; item.updatedAt = updatedAt; item.version = Math.max(1, Number(item.version) || 1) + 1; }
+      if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; item.updatedAt = updatedAt; item.version = Math.max(1, Number(item.version) || 1) + 1; }
     }
-    thread.updatedAt = updatedAt;
+    thread.updatedAt = updatedAt; thread.version = Math.max(1, Number(thread.version) || 1) + 1;
     this.syncThreadQuestionState(thread, now);
     return thread;
   }
 
   setQuestionItemStatus(threadId, itemId, status, now = new Date()) {
+    return this.transitionQuestionItem(threadId, itemId, status, now).thread;
+  }
+
+  transitionQuestionItem(threadId, itemId, status, now = new Date(), { idempotencyKey = null } = {}) {
     if (!['ANSWERED', 'SKIPPED', 'WAITING'].includes(status)) throw new Error("INVALID_QUESTION_STATUS");
     const thread = this.store.questionThreads.find(item => item.id === threadId);
-    if (!thread) return null;
+    if (!thread) return { thread: null, item: null, idempotent: false, conflict: false };
     const item = this.normalizeQuestionItems(thread).find(candidate => candidate.id === itemId);
-    if (!item) return null;
+    if (!item) return { thread: null, item: null, idempotent: false, conflict: false };
+    const terminal = ["ANSWERED", "SKIPPED"];
+    if (idempotencyKey && item.lastMutationKey === idempotencyKey) return { thread, item, idempotent: true, conflict: false };
+    if (terminal.includes(status) && terminal.includes(item.status)) {
+      return { thread, item, idempotent: item.status === status, conflict: item.status !== status };
+    }
+    if (status === "WAITING" && ["WAITING", "ACTIVE", "NEEDS_REVIEW"].includes(item.status)) {
+      return { thread, item, idempotent: true, conflict: false };
+    }
     item.status = status;
     item.updatedAt = now.toISOString();
     item.answeredAt = status === "ANSWERED" ? now.toISOString() : null;
     item.skippedAt = status === "SKIPPED" ? now.toISOString() : null;
     if (status === "WAITING") { item.answeredAt = null; item.skippedAt = null; }
+    item.version = Math.max(1, Number(item.version) || 1) + 1;
+    item.lastMutationKey = idempotencyKey || null;
     thread.updatedAt = now.toISOString();
+    thread.version = Math.max(1, Number(thread.version) || 1) + 1;
     this.syncThreadQuestionState(thread, now);
-    return thread;
+    return { thread, item, idempotent: false, conflict: false };
   }
 
   setUserAnswered(userId, answered, now = new Date(), sessionId) {
@@ -211,10 +236,10 @@ export class QuestionService {
     const answeredAt = answered ? now.toISOString() : null;
     for (const thread of threads) {
       for (const item of this.normalizeQuestionItems(thread)) {
-        if (answered && item.status !== "SKIPPED") { item.status = "ANSWERED"; item.answeredAt = answeredAt; item.updatedAt = now.toISOString(); }
-        if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; item.updatedAt = now.toISOString(); }
+        if (answered && item.status !== "SKIPPED" && item.status !== "ANSWERED") { item.status = "ANSWERED"; item.answeredAt = answeredAt; item.updatedAt = now.toISOString(); item.version = Math.max(1, Number(item.version) || 1) + 1; }
+        if (!answered && item.status === "ANSWERED") { item.status = "WAITING"; item.answeredAt = null; item.updatedAt = now.toISOString(); item.version = Math.max(1, Number(item.version) || 1) + 1; }
       }
-      thread.updatedAt = now.toISOString();
+      thread.updatedAt = now.toISOString(); thread.version = Math.max(1, Number(thread.version) || 1) + 1;
       this.syncThreadQuestionState(thread, now);
     }
     return threads;

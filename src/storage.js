@@ -8,7 +8,7 @@ import { createViewerState } from "./analytics.js";
 import { DEFAULT_TARGET, normalizeTargetInput, recentTargets } from "./target.js";
 import { DEFAULT_GIFT_SETTINGS } from "./gift-service.js";
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 export const LEGACY_SESSION_ID = "legacy-session-v2";
 const defaultFs = { access, copyFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile };
 async function exists(path) { try { await access(path, constants.F_OK); return true; } catch { return false; } }
@@ -56,7 +56,7 @@ export function migrateLegacyComment(comment, defaults = {}) {
   const receivedAt = iso(comment.receivedAt || comment.timestamp) || new Date(0).toISOString();
   return { ...comment, sessionId: String(comment.sessionId || defaults.sessionId || LEGACY_SESSION_ID),
     targetUsername: String(comment.targetUsername || defaults.targetUsername || DEFAULT_TARGET), roomId: comment.roomId ? String(comment.roomId) : null,
-    connectionGeneration: Number(comment.connectionGeneration || 0), id: String(comment.id), timestamp: receivedAt,
+    connectionGeneration: Number(comment.connectionGeneration || 0), id: String(comment.id), eventId: String(comment.eventId || comment.id), timestamp: receivedAt,
     receivedAt, eventTimestamp: iso(comment.eventTimestamp), userId: String(comment.userId || `legacy:${username}`), username,
     nickname: String(comment.nickname || username), avatar: String(comment.avatar || ""), text,
     normalizedText: comment.normalizedText || normalizeText(text), question: comment.question === true || classification.question,
@@ -76,7 +76,7 @@ function normalizeSession(session) {
     startedAt: sessionIso(session.startedAt), connectedAt: sessionIso(session.connectedAt), collectorConnectedAt: sessionIso(session.collectorConnectedAt || session.connectedAt),
     endedAt: sessionIso(session.endedAt), endReason: session.endReason || null, connectionGeneration: Number(session.connectionGeneration || 0),
     commentCount: Number(session.commentCount || 0), questionCount: Number(session.questionCount || 0), answeredCount: Number(session.answeredCount || 0),
-    nextQueueNumber: Math.max(1, Number(session.nextQueueNumber) || 1), welcomedUserIds: Array.isArray(session.welcomedUserIds) ? [...new Set(session.welcomedUserIds.map(String))].slice(-5_000) : [],
+    nextQueueNumber: Math.max(1, Number(session.nextQueueNumber) || 1), nextCommentSequence: Math.max(1, Number(session.nextCommentSequence) || 1), welcomedUserIds: Array.isArray(session.welcomedUserIds) ? [...new Set(session.welcomedUserIds.map(String))].slice(-5_000) : [],
     viewerAnalytics: createViewerState(session.viewerAnalytics) };
 }
 
@@ -87,7 +87,7 @@ export function buildStore(comments = [], metadata = {}) {
   const needsLegacy = rawComments.some(comment => !comment.sessionId);
   if (needsLegacy && !sessions.some(session => session.id === LEGACY_SESSION_ID)) sessions.push(normalizeSession({ id: LEGACY_SESSION_ID, targetUsername, roomId: null, status: "ended", startedAt: null, endedAt: null, endReason: "legacy_migration" }));
   const validActive = sessions.find(session => session.id === metadata.activeSessionId && !["ended","cleared"].includes(session.status));
-  const store = { schemaVersion: SCHEMA_VERSION, comments: [], questionThreads: [], sessions, activeSessionId: validActive?.id || null,
+  const store = { schemaVersion: SCHEMA_VERSION, stateRevision: Math.max(0, Number(metadata.stateRevision) || 0), comments: [], questionThreads: [], sessions, activeSessionId: validActive?.id || null,
     settings: { targetUsername, recentTargets: recentTargets(metadata.settings?.recentTargets, targetUsername) }, gifts:Array.isArray(metadata.gifts)?metadata.gifts:[],giftAttention:Array.isArray(metadata.giftAttention)?metadata.giftAttention:[],giftSettings:{...DEFAULT_GIFT_SETTINGS,...metadata.giftSettings} };
   if(store.giftSettings.applyTo!=="final-only")store.giftSettings.applyTo="final-only";
   const service = new QuestionService(store);
@@ -118,6 +118,13 @@ export function buildStore(comments = [], metadata = {}) {
       thread.addedToQueueAt ||= thread.createdAt || null; thread.createdBy ||= thread.source === "classifier" ? "system" : "operator"; thread.archived = thread.archived === true;
     }
     session.nextQueueNumber = Math.max(Number(session.nextQueueNumber) || 1, Math.max(0, ...used) + 1);
+    const commentsBySourceOrder = [...scopedComments].sort((a,b) => String(a.eventTimestamp || a.receivedAt || a.timestamp || "").localeCompare(String(b.eventTimestamp || b.receivedAt || b.timestamp || "")) || String(a.id).localeCompare(String(b.id)));
+    const validSequence = value => Number.isSafeInteger(Number(value)) && Number(value) > 0;
+    const migratingSequence = Number(metadata.schemaVersion || 0) < SCHEMA_VERSION;
+    let nextCommentSequence = migratingSequence ? 1 : scopedComments.reduce((max, item) => validSequence(item.sequence) ? Math.max(max, Number(item.sequence)) : max, 0) + 1;
+    for (const comment of commentsBySourceOrder) if (migratingSequence || !validSequence(comment.sequence)) comment.sequence = nextCommentSequence++;
+    const maxCommentSequence = nextCommentSequence - 1;
+    session.nextCommentSequence = Math.max(Number(session.nextCommentSequence) || 1, maxCommentSequence + 1);
     session.commentCount = scopedComments.length; session.questionCount = scopedThreads.length; session.answeredCount = scopedThreads.filter(thread => thread.answered).length;
   }
   return store;
@@ -125,6 +132,7 @@ export function buildStore(comments = [], metadata = {}) {
 
 export class JsonStorage {
   constructor({ storeFile, legacyFile, fs = defaultFs }) { this.storeFile = storeFile; this.legacyFile = legacyFile; this.fs = fs; this.store = buildStore(); this.queue = Promise.resolve(); this.pendingTransactions = 0;
+    this.savePromise = null; this.saveRequested = false;
     this.health = { lastSaveAt: null, lastSaveErrorAt: null, consecutiveSaveFailures: 0, storageHealthy: true, loadHealthy: true, invariantErrors: [] }; }
   async load() {
     await mkdir(dirname(this.storeFile), { recursive: true });
@@ -196,8 +204,19 @@ export class JsonStorage {
     } catch (error) { this.health.lastSaveErrorAt = new Date().toISOString(); this.health.consecutiveSaveFailures += 1; this.health.storageHealthy = false; try { await this.fs.unlink(temporaryFile); } catch {} throw error; }
   }
   enqueue(operation) { const current = this.queue.then(operation, operation); this.queue = current.catch(() => undefined); return current; }
-  save() { const snapshot = structuredClone(this.store); return this.enqueue(() => this.persist(snapshot)); }
-  mutate(mutator) { return this.enqueue(async () => { this.pendingTransactions += 1; try { const draft = structuredClone(this.store); const result = await mutator(draft); await this.persist(draft); for (const key of Object.keys(this.store)) delete this.store[key]; Object.assign(this.store, draft); return result; } finally { this.pendingTransactions -= 1; } }); }
+  save() {
+    this.saveRequested = true;
+    if (this.savePromise) return this.savePromise;
+    this.savePromise = (async () => {
+      while (this.saveRequested) {
+        this.saveRequested = false;
+        const snapshot = structuredClone(this.store);
+        await this.enqueue(() => this.persist(snapshot));
+      }
+    })().finally(() => { this.savePromise = null; if (this.saveRequested) void this.save(); });
+    return this.savePromise;
+  }
+  mutate(mutator) { return this.enqueue(async () => { this.pendingTransactions += 1; try { const draft = structuredClone(this.store); const result = await mutator(draft); draft.stateRevision = Math.max(0, Number(draft.stateRevision) || 0) + 1; await this.persist(draft); for (const key of Object.keys(this.store)) delete this.store[key]; Object.assign(this.store, draft); return result; } finally { this.pendingTransactions -= 1; } }); }
   readiness() { const validation = this.validate(); return { ready: this.health.loadHealthy && this.health.storageHealthy && validation.ok, ...this.health, pendingTransactions: this.pendingTransactions }; }
   async backupSession(sessionId) {
     const session = this.store.sessions.find(item => item.id === sessionId); if (!session) throw new Error("SESSION_NOT_FOUND");

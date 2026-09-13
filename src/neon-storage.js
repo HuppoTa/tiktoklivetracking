@@ -28,6 +28,8 @@ export class NeonStorage {
     this.store = buildStore();
     this.queue = Promise.resolve();
     this.pendingTransactions = 0;
+    this.savePromise = null;
+    this.saveRequested = false;
     this.health = {
       lastSaveAt: null,
       lastSaveErrorAt: null,
@@ -107,8 +109,19 @@ export class NeonStorage {
   }
 
   save() {
-    const snapshot = structuredClone(this.store);
-    return this.enqueue(() => this.persist(snapshot));
+    this.saveRequested = true;
+    if (this.savePromise) return this.savePromise;
+    this.savePromise = (async () => {
+      while (this.saveRequested) {
+        this.saveRequested = false;
+        const snapshot = structuredClone(this.store);
+        await this.enqueue(() => this.persist(snapshot));
+      }
+    })().finally(() => {
+      this.savePromise = null;
+      if (this.saveRequested) void this.save();
+    });
+    return this.savePromise;
   }
 
   mutate(mutator) {
@@ -117,6 +130,7 @@ export class NeonStorage {
       try {
         const draft = structuredClone(this.store);
         const result = await mutator(draft);
+        draft.stateRevision = Math.max(0, Number(draft.stateRevision) || 0) + 1;
         await this.persist(draft);
         for (const key of Object.keys(this.store)) delete this.store[key];
         Object.assign(this.store, draft);

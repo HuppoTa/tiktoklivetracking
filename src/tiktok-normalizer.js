@@ -1,12 +1,13 @@
+import { createHash } from "node:crypto";
 import { normalizeText } from "./normalize.js";
 import { classifyQuestion } from "./question-detector.js";
 
 export function normalizeTikTokEvent(data, now = new Date(), { forcedQuestion = false } = {}) {
   const text = String(data?.comment || data?.content || "").trim();
   if (!text) return null;
-  const user = data.user || {};
+  const user = data.user || data || {};
   const username = String(user.uniqueId || user.displayId || "unknown");
-  const userId = String(user.id || user.userId || `legacy:${username}`);
+  const userId = String(data.user ? (user.id || user.userId) : (data.userId || data.idStr) || `legacy:${username}`);
   const classification = classifyQuestion(text, { forced: forcedQuestion });
   const eventTimestampValue = data?.createTime || data?.common?.createTime || data?.timestamp;
   let eventTimestamp = null;
@@ -15,13 +16,16 @@ export function normalizeTikTokEvent(data, now = new Date(), { forcedQuestion = 
     const parsed = new Date(numeric < 1e12 ? numeric * 1000 : numeric);
     if (Number.isFinite(parsed.getTime())) eventTimestamp = parsed.toISOString();
   }
+  const sourceEventId = data?.msgId || data?.common?.msgId || data?.id;
+  const fallbackEventId = createHash("sha256").update(`${userId}\0${eventTimestamp || now.toISOString()}\0${normalizeText(text)}`).digest("hex").slice(0, 32);
   return {
-    id: String(data.msgId || data.common?.msgId || `${now.getTime()}-${Math.random().toString(36).slice(2)}`),
+    id: String(sourceEventId || `fallback:${fallbackEventId}`),
+    eventId: sourceEventId ? String(sourceEventId) : null,
     timestamp: now.toISOString(), receivedAt: now.toISOString(), eventTimestamp,
     userId,
     username,
     nickname: String(user.nickname || username || "Unknown"),
-    avatar: String(user.profilePicture?.url?.[0] || user.avatarThumb?.urlList?.[0] || ""),
+    avatar: String(user.profilePicture?.url?.[0] || user.avatarThumb?.urlList?.[0] || user.profilePictureUrl || ""),
     text,
     normalizedText: normalizeText(text),
     question: classification.question, questionScore: classification.score, questionReasons: classification.reasons,

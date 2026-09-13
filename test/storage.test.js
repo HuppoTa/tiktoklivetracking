@@ -4,7 +4,7 @@ import * as realFs from "node:fs/promises";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonStorage, LEGACY_SESSION_ID } from "../src/storage.js";
+import { buildStore, JsonStorage, LEGACY_SESSION_ID } from "../src/storage.js";
 import { QuestionService } from "../src/question-service.js";
 
 const legacy = [{ id: "old-1", timestamp: "2025-01-01T00:00:00.000Z", user: "old.user", nickname: "Người cũ", avatar: "", text: "Công việc sắp tới thế nào?", question: true, groupId: "old-group" }];
@@ -24,7 +24,7 @@ test("load tự phục hồi khi store.json corrupt và có backup hợp lệ", 
   const store = await storage.load();
   assert.equal(store.comments.length, 1);
   assert.equal(store.questionThreads.length, 1);
-  assert.equal(JSON.parse(await readFile(files.storeFile, "utf8")).schemaVersion, 8);
+  assert.equal(JSON.parse(await readFile(files.storeFile, "utf8")).schemaVersion, 9);
 });
 
 test("migration không mất comment, có backup và chạy lần hai không tạo trùng", async () => {
@@ -32,7 +32,7 @@ test("migration không mất comment, có backup và chạy lần hai không t�
   await writeFile(files.legacyFile, JSON.stringify(legacy));
   const first = new JsonStorage(files);
   await first.load();
-  assert.equal(first.store.schemaVersion, 8);
+  assert.equal(first.store.schemaVersion, 9);
   assert.equal(first.store.comments.length, 1);
   assert.equal(first.store.questionThreads.length, 1);
   assert.equal(JSON.parse(await readFile(`${files.legacyFile}.v1.backup.json`, "utf8")).length, 1);
@@ -40,6 +40,21 @@ test("migration không mất comment, có backup và chạy lần hai không t�
   await second.load();
   assert.equal(second.store.comments.length, 1);
   assert.equal(second.store.questionThreads.length, 1);
+});
+
+test("schema v9 cấp sequence ổn định cho comment cũ và tiếp tục tăng sau restart", () => {
+  const session = { id: "s1", targetUsername: "account.a", status: "ended" };
+  const comments = [
+    { id: "c2", sessionId: "s1", userId: "u1", username: "viewer", text: "Hai", timestamp: "2026-01-01T00:00:02Z" },
+    { id: "c1", sessionId: "s1", userId: "u1", username: "viewer", text: "Một", timestamp: "2026-01-01T00:00:01Z" }
+  ];
+  const first = buildStore(comments, { sessions: [session], comments, questionThreads: [] });
+  const ordered = [...first.comments].sort((a, b) => a.sequence - b.sequence);
+  assert.deepEqual(ordered.map(item => item.id), ["c1", "c2"]);
+  assert.equal(first.sessions[0].nextCommentSequence, 3);
+  const second = buildStore(first.comments, first);
+  assert.deepEqual(second.comments.map(item => item.sequence), first.comments.map(item => item.sequence));
+  assert.equal(second.sessions[0].nextCommentSequence, 3);
 });
 
 test("record thiếu session migrate vào legacy session và idempotent", async () => {
