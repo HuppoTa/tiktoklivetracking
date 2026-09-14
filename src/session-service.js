@@ -82,8 +82,23 @@ export class SessionService {
     const summary = this.summary(id);
     this.store.comments = this.store.comments.filter(comment => comment.sessionId !== id);
     this.store.questionThreads = this.store.questionThreads.filter(thread => thread.sessionId !== id);
+    this.store.gifts = (this.store.gifts || []).filter(gift => gift.sessionId !== id);
+    this.store.giftAttention = (this.store.giftAttention || []).filter(item => item.sessionId !== id);
     this.store.sessions = this.store.sessions.filter(item => item.id !== id);
     return summary;
+  }
+  purgeEndedBefore(cutoff) {
+    const cutoffMs = cutoff instanceof Date ? cutoff.getTime() : new Date(cutoff).getTime();
+    if (!Number.isFinite(cutoffMs)) throw new Error("INVALID_RETENTION_CUTOFF");
+    const ids = this.store.sessions
+      .filter(session => session.status === "ended" && session.id !== this.store.activeSessionId)
+      .filter(session => {
+        const endedAt = new Date(session.endedAt || "").getTime();
+        return Number.isFinite(endedAt) && endedAt <= cutoffMs;
+      })
+      .map(session => session.id);
+    for (const id of ids) this.deleteSession(id);
+    return ids;
   }
   refreshSummary(id) {
     const session = this.get(id); if (!session) return null;

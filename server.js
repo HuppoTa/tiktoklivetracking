@@ -51,6 +51,9 @@ const QUESTION_DEBUG = process.env.QUESTION_DEBUG === "true";
 const ENABLE_WELCOME_NOTIFICATIONS = process.env.NODE_ENV === "production" ? process.env.ENABLE_WELCOME_NOTIFICATIONS === "true" : process.env.ENABLE_WELCOME_NOTIFICATIONS !== "false";
 const WELCOME_DEBUG = process.env.WELCOME_DEBUG === "true";
 const MAX_PENDING_CHAT_EVENTS = positiveEnv("MAX_PENDING_CHAT_EVENTS", 10_000, 100);
+const retentionHoursValue = Number(process.env.SESSION_RETENTION_HOURS);
+const SESSION_RETENTION_HOURS = Number.isFinite(retentionHoursValue) && retentionHoursValue >= 0 ? retentionHoursValue : 0;
+const RETENTION_CHECK_INTERVAL_MS = positiveEnv("RETENTION_CHECK_INTERVAL_MS", 15 * 60_000, 60_000);
 const WATCHDOG = watchdogConfig({ ...process.env, ENABLE_CHAT_WATCHDOG: String(ENABLE_CHAT_WATCHDOG), RECONNECT_COOLDOWN_MS: String(RECONNECT_COOLDOWN_MS), MAX_RECONNECT_ATTEMPTS: String(MAX_RECONNECT_ATTEMPTS) });
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, "data");
 const storage = process.env.DATABASE_URL
@@ -146,7 +149,7 @@ if (REMOTE_BACKEND_MODE) {
   });
 }
 app.use(express.static(join(__dirname, "public")));
-const guard = new ConnectionGuard(); let connection = null; let connectionContext = null; let analyticsSaveTimer = null;
+const guard = new ConnectionGuard(); let connection = null; let connectionContext = null; let analyticsSaveTimer = null; let retentionTimer = null;
 const reconnectController = new ReconnectController({ cooldownMs: RECONNECT_COOLDOWN_MS }); let reconnectFailureStreak = 0;
 let reconnectRequestVersion = 0;
 let watchdogTimer=null, connectionState="OFFLINE", pipelineFailureStreak=0;
@@ -169,6 +172,16 @@ const viewerFor = session => new ViewerAnalytics(session?.viewerAnalytics);
 function setConnectionState(next, generation) { if(generation!==undefined&&!guard.isCurrent(generation))return; if(connectionState===next)return; connectionState=next; setStatus({connectionState:next,live:["LIVE_HEALTHY","LIVE_IDLE","CHAT_SUSPECTED_STALLED","RECONNECTING","DEGRADED"].includes(next)},generation); }
 function setStatus(next, generation) { if (generation !== undefined && !guard.isCurrent(generation)) return; status = { ...status, ...next, username: targetUsername }; io.emit("status", { ...status, ...meta(activeSession()) }); }
 function scheduleSave() { if (analyticsSaveTimer) return; analyticsSaveTimer = setTimeout(async () => { analyticsSaveTimer = null; try { await storage.save(); } catch (error) { console.error("Không lưu được analytics:", error.message); } }, 3000); }
+async function purgeExpiredSessions() {
+  if (SESSION_RETENTION_HOURS <= 0) return [];
+  const cutoff = new Date(Date.now() - SESSION_RETENTION_HOURS * 60 * 60 * 1000);
+  const candidates = store.sessions.filter(session => session.status === "ended" && session.id !== activeSessionId() && Number.isFinite(new Date(session.endedAt || "").getTime()) && new Date(session.endedAt).getTime() <= cutoff.getTime());
+  if (!candidates.length) return [];
+  const purged = await storage.mutate(draft => new SessionService(draft).purgeEndedBefore(cutoff));
+  for (const sessionId of purged) io.emit("session:deleted", { sessionId, retention:true, backupCreated:false, revision:Math.max(0,Number(store.stateRevision)||0), timestamp:new Date().toISOString() });
+  console.info("[retention] purged ended LIVE sessions", { count:purged.length, cutoff:cutoff.toISOString(), sessionIds:purged });
+  return purged;
+}
 function eventIsCurrent(context) { const session = activeSession(); if(!context||connection!==context.connection||!guard.isCurrent(context.generation)){telemetry.oldGenerationEventsDropped++;return false} const valid=Boolean(context.sessionId&&session?.id===context.sessionId&&session.roomId===context.roomId&&session.status==="live"&&session.connectionGeneration===context.generation);if(!valid)telemetry.wrongSessionEventsDropped++;return valid; }
 function isHistorical(normalized, session) { if (!normalized.eventTimestamp || !session.collectorConnectedAt) return false; return new Date(normalized.eventTimestamp).getTime() < new Date(session.collectorConnectedAt).getTime() - 5000; }
 function emitUser(userId, sessionId) { const session = sessions.get(sessionId); const user = questions.getUsers(sessionId).find(item => item.userId === userId); if (user) io.emit("user:updated", { ...user, ...meta(session) }); }
@@ -481,6 +494,6 @@ app.post("/api/disconnect", async (_req, res) => { await stopConnection(); strea
 app.get("/api/export.csv", (req, res) => { const session = resolveSession(req, res, { required: true }); if (!session) return; const comments = scopedComments(session.id); const threads = scopedThreads(session.id); const safe=value=>/^[=+\-@\t\r]/.test(String(value??""))?`'${value}`:value; const quote = value => `"${String(safe(value) ?? "").replaceAll('"', '""')}"`; const rows = [["sessionId","targetUsername","roomId","receivedAt","eventTimestamp","userId","username","nickname","comment","question","questionScore","questionThreadId","questionItemId","questionItemStatus","answered"], ...comments.map(comment => { const thread = threads.find(item => item.commentIds.includes(comment.id)); const item = thread ? questions.normalizeQuestionItems(thread).find(candidate => candidate.commentIds.includes(comment.id)) : null; return [session.id,session.targetUsername,session.roomId,comment.receivedAt,comment.eventTimestamp,comment.userId,comment.username,comment.nickname,comment.text,comment.question,comment.questionScore,thread?.id||"",item?.id||"",item?.status||"",thread?.answered||false]; })]; res.setHeader("Content-Type", "text/csv; charset=utf-8"); res.setHeader("Content-Disposition", `attachment; filename="${session.targetUsername}-comments.csv"`); res.send("\uFEFF" + rows.map(row => row.map(quote).join(",")).join("\n")); });
 
 io.on("connection", socket => { socket.emit("status", { ...status, ...meta(activeSession()) }); const session = activeSession(); if (session) socket.emit("viewer:updated", { ...viewerFor(session).payload(), ...meta(session) }); });
-httpServer.listen(PORT, HOST, () => { console.log(`LIVE Comment Hub: http://${HOST}:${PORT}`); console.log(REMOTE_BACKEND_MODE ? `Development proxy dùng backend: ${REMOTE_BACKEND_URL}` : `Đang theo dõi: @${targetUsername}`); if (!DISABLE_TIKTOK) void connectTikTok(); });
-async function shutdown() { clearTimeout(analyticsSaveTimer); clearInterval(watchdogTimer); await drainChatBatches(); await stopConnection(); try { await storage.save(); } catch {} httpServer.close(() => process.exit(0)); }
+httpServer.listen(PORT, HOST, () => { console.log(`LIVE Comment Hub: http://${HOST}:${PORT}`); console.log(REMOTE_BACKEND_MODE ? `Development proxy dùng backend: ${REMOTE_BACKEND_URL}` : `Đang theo dõi: @${targetUsername}`); if (SESSION_RETENTION_HOURS > 0) { void purgeExpiredSessions().catch(error=>console.error("[retention] purge failed",error.message)); retentionTimer=setInterval(()=>void purgeExpiredSessions().catch(error=>console.error("[retention] purge failed",error.message)),RETENTION_CHECK_INTERVAL_MS); retentionTimer.unref?.(); } if (!DISABLE_TIKTOK) void connectTikTok(); });
+async function shutdown() { clearTimeout(analyticsSaveTimer); clearInterval(watchdogTimer); clearInterval(retentionTimer); await drainChatBatches(); await stopConnection(); try { await storage.save(); } catch {} httpServer.close(() => process.exit(0)); }
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);

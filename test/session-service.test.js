@@ -4,7 +4,7 @@ import { SessionService } from "../src/session-service.js";
 import { ConnectionGuard, retireConnection } from "../src/connection-guard.js";
 import { QuestionService } from "../src/question-service.js";
 
-function store() { return { settings: { targetUsername: "account.a", recentTargets: ["account.a"] }, sessions: [], activeSessionId: null, comments: [], questionThreads: [] }; }
+function store() { return { settings: { targetUsername: "account.a", recentTargets: ["account.a"] }, sessions: [], activeSessionId: null, comments: [], questionThreads: [], gifts:[], giftAttention:[] }; }
 
 test("cùng target không tạo session/connection generation mới", () => {
   const data = store(), service = new SessionService(data, () => new Date("2026-01-01T00:00:00Z"));
@@ -77,7 +77,20 @@ test("kết thúc giữ dữ liệu và start mới không copy", () => {
 test("delete chỉ đúng session, chặn active và reset answers giữ record", () => {
   const data = store(), service = new SessionService(data, () => new Date("2026-01-01T00:00:00Z"));
   const first = service.ensurePending("account.a"); data.comments.push({ id: "m1", sessionId: first.id }); data.questionThreads.push({ id: "q1", sessionId: first.id, answered: true, answeredAt: "2026-01-01T01:00:00Z" });
+  data.gifts.push({ id:"g1", sessionId:first.id }); data.giftAttention.push({ userId:"u1", sessionId:first.id });
   assert.throws(() => service.deleteSession(first.id), /ACTIVE_SESSION/);
   service.end(first.id); const reset = service.resetAnswers(first.id); assert.equal(reset.updated, 1); assert.equal(data.questionThreads[0].answered, false); assert.equal(data.comments.length, 1);
   service.deleteSession(first.id); assert.equal(data.comments.length, 0); assert.equal(data.questionThreads.length, 0);
+  assert.equal(data.gifts.length, 0); assert.equal(data.giftAttention.length, 0);
+});
+
+test("retention chỉ xóa session đã kết thúc trước cutoff", () => {
+  const data=store(),service=new SessionService(data,()=>new Date("2026-01-03T00:00:00Z"));
+  const old=service.ensurePending("account.a");service.end(old.id);old.endedAt="2026-01-01T00:00:00.000Z";
+  const recent=service.start("account.a");service.end(recent.id);recent.endedAt="2026-01-02T18:00:00.000Z";
+  const active=service.start("account.a");
+  data.comments.push({id:"old-comment",sessionId:old.id},{id:"recent-comment",sessionId:recent.id});
+  assert.deepEqual(service.purgeEndedBefore(new Date("2026-01-02T00:00:00Z")), [old.id]);
+  assert.equal(service.get(old.id),null);assert.ok(service.get(recent.id));assert.ok(service.get(active.id));
+  assert.deepEqual(data.comments.map(item=>item.id),["recent-comment"]);
 });
