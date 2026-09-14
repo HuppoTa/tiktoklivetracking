@@ -178,7 +178,7 @@ async function purgeExpiredSessions() {
   const candidates = store.sessions.filter(session => session.status === "ended" && session.id !== activeSessionId() && Number.isFinite(new Date(session.endedAt || "").getTime()) && new Date(session.endedAt).getTime() <= cutoff.getTime());
   if (!candidates.length) return [];
   const purged = await storage.mutate(draft => new SessionService(draft).purgeEndedBefore(cutoff));
-  for (const sessionId of purged) io.emit("session:deleted", { sessionId, retention:true, backupCreated:false, revision:Math.max(0,Number(store.stateRevision)||0), timestamp:new Date().toISOString() });
+  if (purged.length) io.emit("session:deleted", { sessionIds:purged, retention:true, backupCreated:false, revision:Math.max(0,Number(store.stateRevision)||0), timestamp:new Date().toISOString() });
   console.info("[retention] purged ended LIVE sessions", { count:purged.length, cutoff:cutoff.toISOString(), sessionIds:purged });
   return purged;
 }

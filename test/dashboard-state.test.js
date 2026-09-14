@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeCommentUpdate, mergeQuestionUpdate, mergeViewerUpdate,
   normalizeDashboardPayload, restoreQuestion, selectQuestions,
-  pendingCommentIds, setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
+  pendingCommentIds, setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion, deletedSessionIds
 } from "../public/dashboard-state.js";
 
 function thread(overrides = {}) {
@@ -28,6 +28,11 @@ test("đổi selected session clear dữ liệu hiển thị cũ", () => {
   const state = initialDashboardState(); state.comments = [{ id: "m1" }]; state.questions = [thread()];
   clearSelectedSessionState(state, { id: "s2" });
   assert.equal(state.selectedSession.id, "s2"); assert.deepEqual(state.comments, []); assert.deepEqual(state.questions, []);
+});
+
+test("bulk session deletion is reconciled as one event",()=>{
+  assert.deepEqual(deletedSessionIds({sessionIds:["s1","s2"]}),["s1","s2"]);
+  assert.deepEqual(deletedSessionIds({sessionId:"s1"}),["s1"]);
 });
 
 test("PATCH lỗi có thể rollback snapshot đầy đủ", () => {

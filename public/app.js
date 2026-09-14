@@ -1,5 +1,5 @@
 import {
-  acceptsSessionEvent, clearSelectedSessionState, emptyStateFor, initialDashboardState, mergeCommentUpdate, mergeQuestionUpdate, mergeUserUpdate,
+  acceptsSessionEvent, clearSelectedSessionState, deletedSessionIds, emptyStateFor, initialDashboardState, mergeCommentUpdate, mergeQuestionUpdate, mergeUserUpdate,
   mergeViewerUpdate, normalizeDashboardPayload, restoreQuestion, selectQuestions,
   pendingCommentIds, setQuestionAnsweredLocally, setQuestionItemStatusLocally, snapshotQuestion
 } from "./dashboard-state.js";
@@ -794,7 +794,7 @@ for(const eventName of ["gift:summary-updated","gift:attention-created","gift:at
 socket.on("gift:settings-updated",payload=>{if(!payload?.settings)return;state.giftSettings={...state.giftSettings,...payload.settings};render()});
 for (const eventName of ["session:created", "session:updated", "session:ended", "session:deleted", "session:answers-reset"]) socket.on(eventName, async payload => {
   const viewingActive = state.selectedSession?.id === state.activeSession?.id;
-  if (eventName === "session:deleted" && payload?.sessionId === state.selectedSession?.id) { clearSelectedSessionState(state); render(); }
+  if (eventName === "session:deleted" && deletedSessionIds(payload).includes(state.selectedSession?.id)) { clearSelectedSessionState(state); render(); }
   try { const data = await requestJson(viewingActive || !state.selectedSession?.id ? "/api/state" : `/api/state?sessionId=${encodeURIComponent(state.selectedSession.id)}`); state = normalizeDashboardPayload(data, state); render(); } catch (error) { reportError(error, "Không đồng bộ được thay đổi phiên"); }
 });
 socket.on("target:changing", payload => { state.status = { ...state.status, state: "switching", username: payload?.username, message: "Đang chuyển tài khoản...", roomId: null }; renderStatus(); });

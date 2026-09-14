@@ -14,6 +14,11 @@ export function initialDashboardState() {
   };
 }
 
+export function deletedSessionIds(payload) {
+  if (Array.isArray(payload?.sessionIds)) return [...new Set(payload.sessionIds.filter(id => typeof id === "string" && id))];
+  return typeof payload?.sessionId === "string" && payload.sessionId ? [payload.sessionId] : [];
+}
+
 function array(value) { return Array.isArray(value) ? value : []; }
 
 function timestamp(value) {
