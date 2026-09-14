@@ -81,7 +81,7 @@ app.disable("x-powered-by"); app.use((_req,res,next)=>{res.setHeader("X-Content-
 app.use((req, res, next) => {
   if (FRONTEND_ORIGINS.has(req.headers.origin)) {
     res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
-    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
     if (req.method === "OPTIONS") return res.sendStatus(204);
   }
