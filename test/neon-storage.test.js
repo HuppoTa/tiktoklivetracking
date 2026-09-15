@@ -25,6 +25,27 @@ test("NeonStorage requires either a database URL or injected SQL client", () => 
   assert.throws(() => new NeonStorage({}), /DATABASE_URL_REQUIRED/);
 });
 
+test("normalized load backs up and durably repairs duplicate queue rows only", async () => {
+  const metadata = { schemaVersion: 9, storageMode: "normalized-v1", stateRevision: 1, activeSessionId: null, settings: { targetUsername: "fixture.user", recentTargets: ["fixture.user"] }, giftSettings: {} };
+  const session = { id: "s1", targetUsername: "fixture.user", status: "ended", nextQueueNumber: 4 };
+  const threads = [
+    { id: "q1", sessionId: "s1", userId: "u1", queueNumber: 1, commentIds: [], createdAt: "2026-01-01T00:00:00Z" },
+    { id: "q2", sessionId: "s1", userId: "u2", queueNumber: 1, commentIds: [], createdAt: "2026-01-01T00:00:01Z" },
+  ];
+  const rows = [{ kind: "session", record_id: "s1", session_id: "s1", payload: session }, ...threads.map(thread => ({ kind: "question_thread", record_id: JSON.stringify(["s1", thread.id]), session_id: "s1", payload: thread }))];
+  const calls = [];
+  const sql = (...args) => { const query = Array.isArray(args[0]) ? args[0].join("?") : String(args[0]); calls.push({ query, values: args.slice(1) }); if (query.includes("SELECT state")) return [{ state: metadata }]; if (query.includes("FROM app_records")) return rows; return []; };
+  const storage = new NeonStorage({ sql });
+  await storage.load();
+  assert.deepEqual(storage.store.questionThreads.map(thread => thread.queueNumber), [1, 4]);
+  assert.ok(calls.some(call => call.query.includes("INSERT INTO session_backups")));
+  const write = calls.find(call => call.query.includes("INSERT INTO app_records"));
+  assert.ok(write);
+  const changed = JSON.parse(write.values[0]);
+  assert.equal(changed.find(record => record.kind === "question_thread")?.payload.queueNumber, 4);
+  assert.deepEqual(changed.filter(record => record.kind === "question_thread").map(record => record.payload.id), ["q2"]);
+});
+
 test("NeonStorage coalesce save đồng thời để không giữ nhiều snapshot lớn", async () => {
   let block=false,writes=0;const releases=[];
   const sql=(...args)=>{const query=Array.isArray(args[0])?args[0].join(""):String(args[0]);if(query.includes("INSERT INTO app_state")){writes+=1;if(block)return new Promise(resolve=>{releases.push(()=>resolve([]))});}return[];};

@@ -107,12 +107,18 @@ export function buildStore(comments = [], metadata = {}) {
   for (const thread of store.questionThreads) service.syncThreadQuestionState(thread, new Date(thread.lastAskedAt || thread.createdAt || Date.now()));
   for (const session of sessions) {
     const scopedComments = store.comments.filter(comment => comment.sessionId === session.id);
-    const scopedThreads = store.questionThreads.filter(thread => thread.sessionId === session.id && thread.deleted !== true);
+    const scopedThreads = store.questionThreads.filter(thread => thread.sessionId === session.id);
     const ordered = [...scopedThreads].sort((a,b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) ||
       String(scopedComments.find(item => a.commentIds?.includes(item.id))?.timestamp || "").localeCompare(String(scopedComments.find(item => b.commentIds?.includes(item.id))?.timestamp || "")) || String(a.id).localeCompare(String(b.id)));
-    const used = new Set(ordered.map(item => Number(item.queueNumber)).filter(Number.isInteger)); let next = Math.max(0, ...used) + 1;
+    const reserved = new Set(ordered.map(item => Number(item.queueNumber)).filter(value => Number.isSafeInteger(value) && value > 0));
+    const used = new Set(); let next = Math.max(Number(session.nextQueueNumber) || 1, Math.max(0, ...reserved) + 1);
     for (const thread of ordered) {
-      if (!Number.isInteger(Number(thread.queueNumber)) || Number(thread.queueNumber) < 1) { while (used.has(next)) next += 1; thread.queueNumber = next; used.add(next++); }
+      const number = Number(thread.queueNumber);
+      if (!Number.isSafeInteger(number) || number < 1 || used.has(number)) {
+        while (reserved.has(next) || used.has(next)) next += 1;
+        thread.queueNumber = next++;
+      }
+      used.add(Number(thread.queueNumber));
       thread.priorityRank = Number.isFinite(Number(thread.priorityRank)) ? Number(thread.priorityRank) : thread.queueNumber;
       thread.source ||= "classifier"; thread.manualOverride = thread.manualOverride === true; thread.reason ??= null;
       thread.addedToQueueAt ||= thread.createdAt || null; thread.createdBy ||= thread.source === "classifier" ? "system" : "operator"; thread.archived = thread.archived === true;

@@ -57,6 +57,23 @@ test("schema v9 cấp sequence ổn định cho comment cũ và tiếp tục tă
   assert.equal(second.sessions[0].nextCommentSequence, 3);
 });
 
+test("load repairs only duplicate queue numbers without changing valid priority or terminal state", () => {
+  const session = { id: "s-queue", targetUsername: "fixture.user", status: "ended", nextQueueNumber: 5 };
+  const threads = [
+    { id: "q1", sessionId: session.id, userId: "u1", queueNumber: 1, priorityRank: 7, commentIds: [], answered: true, answeredAt: "2026-01-01T00:00:00Z", createdAt: "2026-01-01T00:00:00Z" },
+    { id: "q2", sessionId: session.id, userId: "u2", queueNumber: 1, priorityRank: 2, commentIds: [], answered: false, createdAt: "2026-01-01T00:00:01Z" },
+    { id: "q3", sessionId: session.id, userId: "u3", queueNumber: 3, priorityRank: 3, commentIds: [], answered: false, createdAt: "2026-01-01T00:00:02Z" },
+  ];
+  const store = buildStore([], { schemaVersion: 9, sessions: [session], comments: [], questionThreads: threads });
+  const validator = new JsonStorage({ storeFile: "/tmp/unused-queue-test.json", legacyFile: "/tmp/unused-queue-legacy-test.json" });
+  assert.deepEqual(store.questionThreads.map(thread => thread.queueNumber), [1, 5, 3]);
+  assert.deepEqual(store.questionThreads.map(thread => thread.priorityRank), [7, 2, 3]);
+  assert.equal(store.questionThreads[0].answered, true);
+  assert.equal(store.sessions[0].nextQueueNumber, 6);
+  assert.equal(validator.validate(store).ok, true);
+  assert.deepEqual(buildStore([], store).questionThreads.map(thread => thread.queueNumber), [1, 5, 3]);
+});
+
 test("record thiếu session migrate vào legacy session và idempotent", async () => {
   const files = await paths(); await writeFile(files.storeFile, JSON.stringify({ schemaVersion: 4, comments: legacy, questionThreads: [], sessions: [], settings: { targetUsername: "account.a" } }));
   const first = new JsonStorage(files); await first.load();

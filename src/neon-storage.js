@@ -73,7 +73,20 @@ export class NeonStorage{
     const stateRows=await this.sql`SELECT state FROM app_state WHERE id = ${STATE_ID} LIMIT 1`;
     const metadata=stateRows[0]?.state?parseJson(stateRows[0].state):null;
     const rows=await this.sql`SELECT kind, record_id, session_id, payload FROM app_records`;
-    if(metadata?.storageMode===STORAGE_MODE){this.store=storeFromRecords(metadata,rows);this.setPersistedBaseline(this.store);}
+    if(metadata?.storageMode===STORAGE_MODE){
+      this.store=storeFromRecords(metadata,rows);this.setPersistedBaseline(this.store);
+      const repairedThreads=new Map(this.store.questionThreads.map(thread=>[compositeId(thread.sessionId,thread.id),thread]));
+      const queueRepairs=rows.filter(row=>row.kind==="question_thread"&&Number(parseJson(row.payload)?.queueNumber)!==Number(repairedThreads.get(row.record_id)?.queueNumber));
+      if(queueRepairs.length){
+        const affectedSessions=new Set(queueRepairs.map(row=>String(row.session_id)));
+        for(const sessionId of affectedSessions){
+          const originals=rows.filter(row=>row.session_id===sessionId&&(row.kind==="session"||queueRepairs.includes(row)));
+          await this.sql`INSERT INTO session_backups (session_id,payload) VALUES (${sessionId},${JSON.stringify({schemaVersion:SCHEMA_VERSION,backupType:"queue-repair",exportedAt:new Date().toISOString(),records:originals.map(row=>({kind:row.kind,recordId:row.record_id,payload:parseJson(row.payload)}))})}::jsonb)`;
+          for(const row of originals)this.persistedRecords.set(recordKey(row),recordFingerprint({...row,payload:parseJson(row.payload)}));
+        }
+        await this.persist(this.store);
+      }
+    }
     else{
       this.store=metadata?buildStore(metadata.comments||[],metadata):buildStore();
       // A previous migration can be followed by a rollback that rewrites the
