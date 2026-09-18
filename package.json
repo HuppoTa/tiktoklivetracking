@@ -6,6 +6,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "REMOTE_BACKEND_MODE=1 node --env-file-if-exists=.env.local --watch server.js",
+    "dev:remote": "npm run dev",
+    "dev:local": "node --env-file-if-exists=.env.local scripts/run-local.js dev",
+    "dev:live": "node --env-file-if-exists=.env.local scripts/run-local.js live",
+    "test:local": "node --test test/local-*.test.js",
     "dev:collector": "node --env-file-if-exists=.env.local --watch server.js",
     "build": "node scripts/generate-runtime-config.js",
     "test": "node --test",
