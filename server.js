@@ -339,6 +339,7 @@ async function connectTikTok(reason = "connect", approvedRoomId = null) {
 const current = new TikTokLiveConnection(username, { 
   enableExtendedGiftInfo: false, 
   processInitialData: false,
+  signApiKey: process.env.EULERSTREAM_API_KEY || "",
   sessionId: process.env.TIKTOK_SESSION_ID || ""
 });
   const context = { connection: current, generation, username, sessionId: null, roomId: null }; connection = current; connectionContext = context;
