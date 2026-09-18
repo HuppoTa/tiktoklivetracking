@@ -21,13 +21,19 @@ import { StreamEndConfirmation } from "./src/collector-lifecycle.js";
 import { buildWelcomeMemberPayload } from "./src/member-welcome.js";
 import { connectWithRoomFallback, describeConnectionError, errorSourceMessages, isOfflineError, reconnectBackoffMs, ReconnectController } from "./src/reconnect-policy.js";
 import { AuthService, LoginRateLimiter, MemorySessionRepository, NeonSessionRepository } from "./src/auth-service.js";
+import { resolveLocalEnvironment } from "./src/local-environment.js";
+import { fetchProductionCollectorStatus, LocalLiveGuard } from "./src/local-live-guard.js";
+import { createLocalTestAccount } from "./src/local-test-account.js";
+import { localActionPolicy, remoteProxyPolicy } from "./src/local-request-policy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const localConfig = process.env.APP_ENV === "local" ? resolveLocalEnvironment(process.env) : null;
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
 const ALLOW_REMOTE_ACCESS = process.env.ALLOW_REMOTE_ACCESS === "true";
-const AUTH_USERNAME = process.env.AUTH_USERNAME || "";
-const AUTH_PASSWORD_HASH = process.env.AUTH_PASSWORD_HASH || "";
+const localAccount = localConfig ? await createLocalTestAccount(process.env) : null;
+const AUTH_USERNAME = localAccount?.username || process.env.AUTH_USERNAME || "";
+const AUTH_PASSWORD_HASH = localAccount?.passwordHash || process.env.AUTH_PASSWORD_HASH || "";
 const REMOTE_BACKEND_MODE = process.env.REMOTE_BACKEND_MODE === "1";
 const REMOTE_BACKEND_URL = process.env.REMOTE_BACKEND_URL || process.env.API_BASE_URL || "https://tiktoklivetracking-api.onrender.com";
 const API_BASE_URL = REMOTE_BACKEND_MODE ? "/remote" : process.env.API_BASE_URL || "";
@@ -40,11 +46,11 @@ const FRONTEND_ORIGINS = new Set([
 ]);
 const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 if ((!loopbackHosts.has(HOST) || ALLOW_REMOTE_ACCESS) && !(AUTH_USERNAME && AUTH_PASSWORD_HASH)) throw new Error("REMOTE_ACCESS_REQUIRES_AUTH");
-const DISABLE_TIKTOK = process.env.DISABLE_TIKTOK === "1" || REMOTE_BACKEND_MODE;
+const DISABLE_TIKTOK = localConfig?.disableTikTok ?? (process.env.DISABLE_TIKTOK === "1" || REMOTE_BACKEND_MODE);
 const positiveEnv=(key,fallback,min)=>{const n=Number(process.env[key]);return Number.isFinite(n)&&n>=min?n:fallback};
 const RECONNECT_COOLDOWN_MS = positiveEnv("RECONNECT_COOLDOWN_MS", 10_000, 1_000);
 const RECONNECT_BACKOFF_BASE_MS = positiveEnv("RECONNECT_BACKOFF_BASE_MS", 5_000, 250);
-const MAX_RECONNECT_ATTEMPTS = positiveEnv("MAX_RECONNECT_ATTEMPTS", 6, 1);
+const MAX_RECONNECT_ATTEMPTS = positiveEnv("MAX_RECONNECT_ATTEMPTS", localConfig?.maxReconnectAttempts || 6, 1);
 const ENABLE_CHAT_WATCHDOG=process.env.ENABLE_CHAT_WATCHDOG==="true";
 const WATCHDOG_INTERVAL_MS=positiveEnv("WATCHDOG_INTERVAL_MS",15000,1000),CHAT_IDLE_MS=positiveEnv("CHAT_IDLE_MS",90000,10000),CHAT_STALL_SUSPECT_MS=positiveEnv("CHAT_STALL_SUSPECT_MS",180000,30000),CHAT_STALL_RECONNECT_MS=positiveEnv("CHAT_STALL_RECONNECT_MS",300000,60000);
 const QUESTION_DEBUG = process.env.QUESTION_DEBUG === "true";
@@ -52,10 +58,10 @@ const ENABLE_WELCOME_NOTIFICATIONS = process.env.NODE_ENV === "production" ? pro
 const WELCOME_DEBUG = process.env.WELCOME_DEBUG === "true";
 const MAX_PENDING_CHAT_EVENTS = positiveEnv("MAX_PENDING_CHAT_EVENTS", 10_000, 100);
 const retentionHoursValue = Number(process.env.SESSION_RETENTION_HOURS);
-const SESSION_RETENTION_HOURS = Number.isFinite(retentionHoursValue) && retentionHoursValue >= 0 ? retentionHoursValue : 0;
+const SESSION_RETENTION_HOURS = Number.isFinite(retentionHoursValue) && retentionHoursValue >= 0 ? retentionHoursValue : localConfig ? 168 : 0;
 const RETENTION_CHECK_INTERVAL_MS = positiveEnv("RETENTION_CHECK_INTERVAL_MS", 15 * 60_000, 60_000);
 const WATCHDOG = watchdogConfig({ ...process.env, ENABLE_CHAT_WATCHDOG: String(ENABLE_CHAT_WATCHDOG), RECONNECT_COOLDOWN_MS: String(RECONNECT_COOLDOWN_MS), MAX_RECONNECT_ATTEMPTS: String(MAX_RECONNECT_ATTEMPTS) });
-const DATA_DIR = process.env.DATA_DIR || join(__dirname, "data");
+const DATA_DIR = localConfig?.dataDir || process.env.DATA_DIR || join(__dirname, "data");
 const storage = process.env.DATABASE_URL
   ? new NeonStorage({ databaseUrl: process.env.DATABASE_URL })
   : new JsonStorage({ storeFile: join(DATA_DIR, "store.json"), legacyFile: join(DATA_DIR, "comments.json") });
@@ -126,9 +132,12 @@ app.post("/api/auth/logout", async (req, res) => {
 app.use(async (req,res,next)=>{if(!req.path.startsWith("/api/")||['/api/health','/api/ready'].includes(req.path)||req.path.startsWith('/api/auth/'))return next();if(!requiresAuth)return next();const session=await authenticateRequest(req);if(!session)return res.status(401).json({error:{code:"UNAUTHORIZED",message:"Vui lòng đăng nhập"}});req.auth=session;next();});
 io.use(async (socket,next)=>{if(!requiresAuth)return next();const token=String(socket.handshake.auth?.token||"");const session=await auth.authenticate(token,socket.handshake.headers["user-agent"]);if(session){socket.data.auth=session;return next()}next(new Error("UNAUTHORIZED"));});
 app.get("/runtime-config.js", (_req, res) => {
-  const config = REMOTE_BACKEND_MODE
+  const config = localConfig
+    ? { apiBaseUrl: "", socketUrl: "", localMode: localConfig.mode, localLabel: localConfig.mode === "dev" ? "LOCAL DEVELOPMENT — TikTok disabled" : "LOCAL LIVE TEST — dữ liệu chỉ lưu local" }
+    : REMOTE_BACKEND_MODE
     ? { apiBaseUrl: API_BASE_URL, socketUrl: SOCKET_URL, socketPath: "/remote/socket.io", devRemote: true }
     : { apiBaseUrl: API_BASE_URL, socketUrl: SOCKET_URL };
+  res.setHeader("Cache-Control", "no-store");
   res.type("application/javascript").send(`globalThis.__APP_CONFIG__ = ${JSON.stringify(config)};\n`);
 });
 if (REMOTE_BACKEND_MODE) {
@@ -141,7 +150,11 @@ if (REMOTE_BACKEND_MODE) {
     if (typeof resOrSocket?.end === "function") resOrSocket.end(JSON.stringify({ error: { code: "REMOTE_BACKEND_UNAVAILABLE", message: "Backend Render tạm thời không phản hồi" } }));
     else resOrSocket?.destroy?.();
   });
-  app.use("/remote", (req, res) => proxy.web(req, res));
+  app.use("/remote", (req, res) => {
+    const code = remoteProxyPolicy(req.method, req.url);
+    if (code) return res.status(405).json({ error: { code, message: "Production proxy chỉ cho phép đọc dữ liệu." } });
+    proxy.web(req, res);
+  });
   httpServer.on("upgrade", (req, socket, head) => {
     if (!req.url?.startsWith("/remote/socket.io")) return;
     req.url = req.url.slice("/remote".length);
@@ -150,6 +163,7 @@ if (REMOTE_BACKEND_MODE) {
 }
 app.use(express.static(join(__dirname, "public")));
 const guard = new ConnectionGuard(); let connection = null; let connectionContext = null; let analyticsSaveTimer = null; let retentionTimer = null;
+let localLiveGuard = null;
 const reconnectController = new ReconnectController({ cooldownMs: RECONNECT_COOLDOWN_MS }); let reconnectFailureStreak = 0;
 let reconnectRequestVersion = 0;
 let watchdogTimer=null, connectionState="OFFLINE", pipelineFailureStreak=0;
@@ -275,6 +289,7 @@ function onMember(data, context) {
 }
 async function stopConnection() { acceptingChatEvents = false; await drainChatBatches(); if (pendingChatEvents.length) { const dropped = pendingChatEvents.splice(0); telemetry.chatDroppedCount += dropped.length; for (const entry of dropped) chatTelemetry("CHAT_DROPPED", entry.context, entry.comment, "CONNECTION_RETIRED_PENDING"); } const old = connection; connection = null; connectionContext = null; await retireConnection(guard, old); }
 async function requestReconnect(reason = "manual_reconnect") {
+  if (localConfig?.mode === "live") return localLiveGuard.reconnect();
   const admission = reconnectController.request(async () => {
     guard.clearReconnect();
     const requestVersion = ++reconnectRequestVersion;
@@ -296,6 +311,7 @@ async function requestReconnect(reason = "manual_reconnect") {
   return admission.promise;
 }
 function scheduleReconnect(generation, message, reason="connection_lost", requestedDelay) {
+  if (localConfig?.mode === "live" && (!localLiveGuard?.active || localLiveGuard.remainingMs <= 0)) return false;
   if (!guard.isCurrent(generation)) return false;
   sessions.markOffline();
   if (reconnectFailureStreak >= MAX_RECONNECT_ATTEMPTS) {
@@ -313,13 +329,18 @@ function scheduleReconnect(generation, message, reason="connection_lost", reques
 function watchdogTick(){const now=Date.now(),lastAnyEventAt=new Date(telemetry.lastAnyEventAt||0).getTime(),lastChatAt=new Date(telemetry.lastChatCallbackAt||0).getTime(),snapshot={now,lastChatAt,lastAnyEventAt,connected:Boolean(connection),roomId:activeSession()?.roomId||null,reconnecting:reconnectController.inProgress,lastReconnectAt:reconnectController.lastStartedAt,consecutiveFailures:reconnectFailureStreak};const next=evaluateWatchdog(snapshot,WATCHDOG);setConnectionState(next);if(watchdogShouldReconnect(snapshot,WATCHDOG))void requestReconnect("CHAT_WATCHDOG_STALLED")}
 watchdogTimer=setInterval(watchdogTick,WATCHDOG_INTERVAL_MS);watchdogTimer.unref?.();
 
-async function connectTikTok(reason = "connect") {
+async function connectTikTok(reason = "connect", approvedRoomId = null) {
+  if (localConfig?.mode === "live" && !approvedRoomId) return { ok: false, error: "LOCAL_ROOM_PREFLIGHT_REQUIRED" };
   if (DISABLE_TIKTOK) return { ok: false, error: "TikTok connector đang tắt" };
   const previousSession = activeSession();
   const cachedRoomId = previousSession?.targetUsername === targetUsername && previousSession?.roomId ? previousSession.roomId : null;
   acceptingChatEvents = false; telemetry.lastConnectAttempt=new Date().toISOString(); telemetry.lastRoomIdErrorSources=[]; await stopConnection(); const generation = guard.next(); const username = targetUsername;
   sessions.ensurePending(username, generation); setStatus({ state: "connecting", message: `Đang kết nối @${username}...`, roomId: null, nextReconnectAt: null }, generation);
-  const current = new TikTokLiveConnection(username, { enableExtendedGiftInfo: false, processInitialData: false });
+const current = new TikTokLiveConnection(username, { 
+  enableExtendedGiftInfo: false, 
+  processInitialData: false,
+  sessionId: process.env.TIKTOK_SESSION_ID || "MÃ_SESSION_ID_CỦA_BẠN"
+});
   const context = { connection: current, generation, username, sessionId: null, roomId: null }; connection = current; connectionContext = context;
   current.on(WebcastEvent.CHAT, data => void onChat(data, context, false));
   current.on(WebcastEvent.QUESTION_NEW, data => void onChat(normalizeQuestionEvent(data), context, true));
@@ -339,12 +360,13 @@ async function connectTikTok(reason = "connect") {
     scheduleReconnect(generation, `Collector gặp lỗi: ${message}`, "connector_error");
   });
   try {
-    const result = await connectWithRoomFallback(current, cachedRoomId, error => {
+    const result = approvedRoomId ? await current.connect(approvedRoomId) : await connectWithRoomFallback(current, cachedRoomId, error => {
       telemetry.lastRoomIdErrorSources = errorSourceMessages(error);
       telemetry.lastRoomIdFallbackAt = new Date().toISOString();
       console.warn(`TikTok Room ID resolver failed; retrying cached room ${cachedRoomId}`);
       if (telemetry.lastRoomIdErrorSources.length) console.warn("TikTok Room ID sources:", telemetry.lastRoomIdErrorSources);
     }); if (connection !== current || !guard.isCurrent(generation)) return { ok: false, stale: true };
+    if (approvedRoomId && String(result.roomId) !== String(approvedRoomId)) throw new Error("LOCAL_ROOM_CHANGED");
     guard.clearReconnect();
     const attached = sessions.attachRoom(username, result.roomId, generation, new Date()); if (!attached) throw new Error("TikTok không trả room ID hợp lệ"); telemetry.lastSuccessfulConnect=new Date().toISOString(); reconnectFailureStreak=0; telemetry.reconnectFailureStreak=0; acceptingChatEvents=true;
     streamEndConfirmation.observeConnected({ sessionId: attached.session.id, roomId: attached.session.roomId });
@@ -384,6 +406,27 @@ async function connectTikTok(reason = "connect") {
   }
 }
 
+if (localConfig?.mode === "live") {
+  localLiveGuard = new LocalLiveGuard({
+    ttlMs: localConfig.liveTtlMs,
+    maxReconnectAttempts: localConfig.maxReconnectAttempts,
+    resolveCandidateRoom: async username => new TikTokLiveConnection(username, { processInitialData: false }).fetchRoomId(),
+    getProductionStatus: async () => fetchProductionCollectorStatus(localConfig.productionRoomStatusUrl),
+    connect: async (username, roomId) => {
+      if (targetUsername !== username) {
+        const previousUsername = targetUsername;
+        const switched = sessions.switchTarget(username, guard.generation + 1);
+        targetUsername = username;
+        store.settings.targetUsername = username;
+        await storage.save();
+        io.emit("target:changed", { username, previousUsername, sessionId: switched.session.id, targetUsername: username, roomId: null, timestamp: new Date().toISOString() });
+      }
+      return connectTikTok("local_live_test", roomId);
+    },
+    disconnect: async () => { await stopConnection(); setConnectionState("OFFLINE"); setStatus({ state: "idle", message: "Local LIVE Test đã dừng", roomId: null, nextReconnectAt: null }); },
+  });
+}
+
 function validId(value) { return typeof value === "string" && value.length > 0 && value.length <= 200 && /^[\w:.-]+$/u.test(value); }
 function validUserId(value) { return validId(value) && !["undefined","null"].includes(value); }
 function resolveSession(req, res, { required = false } = {}) { const id = String(req.query.sessionId || req.body?.sessionId || activeSessionId() || ""); const session = sessions.get(id); if (!session && (required || id)) { res.status(404).json({ error: "Không tìm thấy phiên" }); return null; } return session; }
@@ -393,6 +436,19 @@ function requireAnswered(req, res) { if (typeof req.body?.answered !== "boolean"
 app.get("/api/health", (_req,res)=>res.json({status:"ok",process:{uptimeSeconds:Math.floor(process.uptime())}}));
 app.get("/api/ready", (_req,res)=>{const ready=storage.readiness(),chatAt=new Date(telemetry.lastChatCallbackAt||0).getTime();const payload={status:ready.ready?"ok":ready.storageHealthy?"degraded":"unhealthy",storage:{healthy:ready.storageHealthy,lastSaveAt:ready.lastSaveAt,lastErrorAt:ready.lastSaveErrorAt,consecutiveFailures:ready.consecutiveSaveFailures,pendingTransactions:ready.pendingTransactions},collector:{state:status.state,connectionState,live:["LIVE_HEALTHY","LIVE_IDLE","CHAT_SUSPECTED_STALLED","RECONNECTING","DEGRADED"].includes(connectionState),watchdogEnabled:ENABLE_CHAT_WATCHDOG,welcomeNotificationsEnabled:ENABLE_WELCOME_NOTIFICATIONS,chatIdleForMs:chatAt?Date.now()-chatAt:null,reconnectInProgress:reconnectController.inProgress,activeConnectionCount:connection?1:0,chatReceivedCount:telemetry.chatReceivedCount,chatPersistedCount:telemetry.chatPersistedCount,chatDroppedCount:telemetry.chatDroppedCount,chatBackpressureDroppedCount:telemetry.chatBackpressureDroppedCount,memberReceivedCount:telemetry.memberReceivedCount,memberEmittedCount:telemetry.memberEmittedCount,memberDuplicateCount:telemetry.memberDuplicateCount,memberDroppedCount:telemetry.memberDroppedCount,lastMemberAt:telemetry.lastMemberEventAt,lastMemberDropReason:telemetry.lastMemberDropReason},process:{uptimeSeconds:Math.floor(process.uptime())}};res.status(ready.ready?200:503).json(payload);});
 app.get("/api/collector/telemetry", (_req,res)=>res.json({ collector:{ targetUsername, sessionId:activeSessionId()||null, roomId:activeSession()?.roomId||null, connectionGeneration:guard.generation, connectionState, acceptingChatEvents, pendingChatEvents:pendingChatEvents.length, reconnectFailureStreak, telemetry } }));
+if (localConfig) {
+  app.get("/api/local/status", (_req, res) => res.json({ mode: localConfig.mode, storage: "local-file", proxy: false, collectorEnabled: localConfig.mode === "live", active: Boolean(localLiveGuard?.active), remainingMs: localLiveGuard?.remainingMs || 0, targetUsername, roomId: localLiveGuard?.roomId || null, productionRoomCheck: localConfig.productionRoomStatusUrl ? "configured" : "unavailable" }));
+  app.post("/api/local/live/start", async (req, res) => {
+    if (localConfig.mode !== "live") return res.status(409).json({ error: { code: "LOCAL_COLLECTOR_DISABLED", message: "Local Development chỉ dùng fixtures; TikTok collector đang tắt." } });
+    const username = normalizeTargetInput(req.body?.username);
+    if (!username) return res.status(400).json({ error: { code: "INVALID_USERNAME", message: "TikTok ID test không hợp lệ." } });
+    if (localLiveGuard.active || localLiveGuard.busy) return res.status(409).json({ error: { code: "ALREADY_ACTIVE", message: "Đã có một Local LIVE Test đang chạy." } });
+    const result = await localLiveGuard.start(username);
+    const messages = { ROOM_CONFLICT: "Không thể bắt đầu Local LIVE Test vì production đang theo dõi cùng TikTok roomId. Phiên production không bị thay đổi.", PRODUCTION_STATUS_UNAVAILABLE: "Không xác minh được roomId production nên Local LIVE Test bị chặn an toàn.", LOCAL_ROOM_UNAVAILABLE: "Không resolve được roomId của LIVE test.", LOCAL_CONNECT_FAILED: "Local collector không kết nối được.", ALREADY_ACTIVE: "Đã có một Local LIVE Test đang chạy." };
+    res.status(result.ok ? 200 : 409).json(result.ok ? result : { error: { code: result.code, message: messages[result.code] || "Local LIVE Test bị chặn an toàn." } });
+  });
+  app.post("/api/local/live/stop", async (_req, res) => { if (localConfig.mode !== "live") return res.status(409).json({ error: { code: "LOCAL_COLLECTOR_DISABLED", message: "TikTok collector đang tắt." } }); res.json(await localLiveGuard.stop()); });
+}
 app.post("/api/debug/welcome", (req, res) => {
   if (process.env.NODE_ENV === "production") return res.status(404).json({ error: "Not found" });
   if (!ENABLE_WELCOME_NOTIFICATIONS) return res.status(409).json({ error: "WELCOME_FEATURE_DISABLED" });
@@ -482,18 +538,33 @@ app.patch("/api/questions/:id/archive", async (req, res) => {
   const payload = { ...questions.enrichThread(thread), ...meta(session) }; io.emit("question:updated", payload); io.emit("queue:updated", { ...meta(session), questionId: thread.id }); res.json(payload);
 });
 
+if (localConfig) {
+  app.use((req, res, next) => {
+    const code = localActionPolicy(localConfig.mode, req.method, req.path);
+    if (code) return res.status(409).json({ error: { code, message: "Thao tác lifecycle này bị khóa trong môi trường local." } });
+    if (localConfig.mode === "live" && req.method === "POST" && /^\/api\/sessions\/[^/]+\/end$/.test(req.path) && localLiveGuard.active) return res.status(409).json({ code: "LOCAL_LIVE_STOP_FIRST" });
+    next();
+  });
+  if (localConfig.mode === "live") app.post("/api/disconnect", async (_req, res) => res.json(await localLiveGuard.stop()));
+}
+
 app.post("/api/sessions/:id/end", async (req, res) => { if (!validId(req.params.id)) return res.status(400).json({ error: "Session ID không hợp lệ" }); const session = sessions.get(req.params.id); if (!session) return res.status(404).json({ error: "Không tìm thấy phiên" }); if (activeSessionId() === session.id) await stopConnection(); streamEndConfirmation.clear(); sessions.end(session.id, "manual_end"); await storage.save(); const payload = { ...sessions.summary(session.id), ...meta(session) }; io.emit("session:ended", payload); setStatus({ state: "idle", message: "Đã kết thúc phiên", roomId: null, nextReconnectAt: null }); res.json(payload); });
 app.post("/api/sessions/start", async (_req, res) => { if (activeSession()?.status === "live") return res.status(409).json({ error: "Hãy kết thúc phiên LIVE hiện tại trước" }); streamEndConfirmation.clear(); const session = sessions.start(targetUsername, guard.generation + 1); await storage.save(); io.emit("session:created", { ...sessions.summary(session.id), ...meta(session) }); const result = await connectTikTok(); res.status(result.ok ? 201 : 202).json({ session: sessions.summary(session.id), connection: result }); });
 app.post("/api/sessions/:id/reset-answers", async (req, res) => { const session = sessions.get(req.params.id); if (!session) return res.status(404).json({ error: "Không tìm thấy phiên" }); if (req.body?.confirmation !== "RESET TRA BAI") return res.status(400).json({ error: "Confirmation không hợp lệ" }); const result = sessions.resetAnswers(session.id); await storage.save(); const payload = { sessionId: session.id, updated: result.updated, ...meta(session) }; io.emit("session:answers-reset", payload); res.json(payload); });
 app.delete("/api/sessions/:id", async (req, res) => { const session = sessions.get(req.params.id); if (!session) return res.status(404).json({ error: "Không tìm thấy phiên" }); if (req.body?.confirmation !== "XOA PHIEN") return res.status(400).json({ error: "Confirmation không hợp lệ" }); if (session.status === "live" || activeSessionId() === session.id) return res.status(409).json({ error: "Phải kết thúc phiên hiện tại trước khi xóa" }); const backup = await storage.backupSession(session.id); const snapshot = structuredClone(store); try { const summary = sessions.deleteSession(session.id); await storage.save(); const payload = { sessionId: session.id, summary, backupCreated: true, ...meta(session) }; io.emit("session:deleted", payload); res.json(payload); } catch (error) { Object.assign(store, snapshot); res.status(500).json({ error: `Không xóa được phiên: ${error.message}` }); } });
 
 app.post("/api/target", async (req, res) => { const normalized = normalizeTargetInput(req.body?.username); if (!normalized) return res.status(400).json({ ok: false, error: { code: "INVALID_USERNAME", message: "TikTok ID không hợp lệ." } }); if (normalized === targetUsername) return res.json({ ok: true, unchanged: true, target: targetPayload(), status }); const previousUsername = targetUsername; io.emit("target:changing", { username: normalized, previousUsername, timestamp: new Date().toISOString(), sessionId: activeSessionId(), roomId: activeSession()?.roomId || null, targetUsername }); await stopConnection(); streamEndConfirmation.clear(); const switched = sessions.switchTarget(normalized, guard.generation + 1); targetUsername = normalized; await storage.save(); const payload = { username: normalized, previousUsername, sessionId: switched.session.id, targetUsername: normalized, roomId: null, timestamp: new Date().toISOString() }; io.emit("target:changed", payload); const result = await connectTikTok(); if (!result.ok) return res.status(502).json({ ok: false, error: { code: "CONNECTION_FAILED", message: result.error }, target: targetPayload(), status }); res.json({ ok: true, target: targetPayload(), status, activeSession: activeSession() }); });
-app.post("/api/connect", async (_req, res) => { const result = await requestReconnect("manual_connect"); res.status(result.ok ? 200 : result.cooldown ? 202 : 503).json(result.ok ? { ok: true, ...result } : { ok: false, ...result }); });
+app.post("/api/connect", async (_req, res) => { 
+  const result = await requestReconnect("manual_connect"); 
+  // Trả về mã 400 thay vì 503 khi kết nối thất bại
+  const statusCode = result.ok ? 200 : result.cooldown ? 202 : 400;
+  res.status(statusCode).json(result.ok ? { ok: true, ...result } : { ok: false, ...result }); 
+});
 app.post("/api/collector/reconnect", async (_req, res) => { const result = await requestReconnect("manual_reconnect"); res.status(result.ok ? 200 : result.cooldown ? 202 : 503).json({ ...result, reconnectInProgress: reconnectController.inProgress, reason: "MANUAL_RECONNECT" }); });
 app.post("/api/disconnect", async (_req, res) => { await stopConnection(); streamEndConfirmation.clear(); setStatus({ state: "idle", message: "Đã dừng thu comment", roomId: null, nextReconnectAt: null }); res.json({ ok: true }); });
 app.get("/api/export.csv", (req, res) => { const session = resolveSession(req, res, { required: true }); if (!session) return; const comments = scopedComments(session.id); const threads = scopedThreads(session.id); const safe=value=>/^[=+\-@\t\r]/.test(String(value??""))?`'${value}`:value; const quote = value => `"${String(safe(value) ?? "").replaceAll('"', '""')}"`; const rows = [["sessionId","targetUsername","roomId","receivedAt","eventTimestamp","userId","username","nickname","comment","question","questionScore","questionThreadId","questionItemId","questionItemStatus","answered"], ...comments.map(comment => { const thread = threads.find(item => item.commentIds.includes(comment.id)); const item = thread ? questions.normalizeQuestionItems(thread).find(candidate => candidate.commentIds.includes(comment.id)) : null; return [session.id,session.targetUsername,session.roomId,comment.receivedAt,comment.eventTimestamp,comment.userId,comment.username,comment.nickname,comment.text,comment.question,comment.questionScore,thread?.id||"",item?.id||"",item?.status||"",thread?.answered||false]; })]; res.setHeader("Content-Type", "text/csv; charset=utf-8"); res.setHeader("Content-Disposition", `attachment; filename="${session.targetUsername}-comments.csv"`); res.send("\uFEFF" + rows.map(row => row.map(quote).join(",")).join("\n")); });
 
 io.on("connection", socket => { socket.emit("status", { ...status, ...meta(activeSession()) }); const session = activeSession(); if (session) socket.emit("viewer:updated", { ...viewerFor(session).payload(), ...meta(session) }); });
-httpServer.listen(PORT, HOST, () => { console.log(`LIVE Comment Hub: http://${HOST}:${PORT}`); console.log(REMOTE_BACKEND_MODE ? `Development proxy dùng backend: ${REMOTE_BACKEND_URL}` : `Đang theo dõi: @${targetUsername}`); if (SESSION_RETENTION_HOURS > 0) { void purgeExpiredSessions().catch(error=>console.error("[retention] purge failed",error.message)); retentionTimer=setInterval(()=>void purgeExpiredSessions().catch(error=>console.error("[retention] purge failed",error.message)),RETENTION_CHECK_INTERVAL_MS); retentionTimer.unref?.(); } if (!DISABLE_TIKTOK) void connectTikTok(); });
+httpServer.listen(PORT, HOST, () => { console.log(`LIVE Comment Hub: http://${HOST}:${PORT}`); console.log(localConfig ? `LOCAL ${localConfig.mode.toUpperCase()} — isolated file storage` : REMOTE_BACKEND_MODE ? `PRODUCTION READ-ONLY PROXY: ${REMOTE_BACKEND_URL} (mutations blocked locally)` : `Đang theo dõi: @${targetUsername}`); if (SESSION_RETENTION_HOURS > 0) { void purgeExpiredSessions().catch(error=>console.error("[retention] purge failed",error.message)); retentionTimer=setInterval(()=>void purgeExpiredSessions().catch(error=>console.error("[retention] purge failed",error.message)),RETENTION_CHECK_INTERVAL_MS); retentionTimer.unref?.(); } if (!DISABLE_TIKTOK && !localConfig) void connectTikTok(); });
 async function shutdown() { clearTimeout(analyticsSaveTimer); clearInterval(watchdogTimer); clearInterval(retentionTimer); await drainChatBatches(); await stopConnection(); try { await storage.save(); } catch {} httpServer.close(() => process.exit(0)); }
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);
