@@ -339,7 +339,7 @@ async function connectTikTok(reason = "connect", approvedRoomId = null) {
 const current = new TikTokLiveConnection(username, { 
   enableExtendedGiftInfo: false, 
   processInitialData: false,
-  sessionId: process.env.TIKTOK_SESSION_ID || "MÃ_SESSION_ID_CỦA_BẠN"
+  sessionId: process.env.TIKTOK_SESSION_ID || ""
 });
   const context = { connection: current, generation, username, sessionId: null, roomId: null }; connection = current; connectionContext = context;
   current.on(WebcastEvent.CHAT, data => void onChat(data, context, false));
