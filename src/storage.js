@@ -88,7 +88,7 @@ export function buildStore(comments = [], metadata = {}) {
   if (needsLegacy && !sessions.some(session => session.id === LEGACY_SESSION_ID)) sessions.push(normalizeSession({ id: LEGACY_SESSION_ID, targetUsername, roomId: null, status: "ended", startedAt: null, endedAt: null, endReason: "legacy_migration" }));
   const validActive = sessions.find(session => session.id === metadata.activeSessionId && !["ended","cleared"].includes(session.status));
   const store = { schemaVersion: SCHEMA_VERSION, stateRevision: Math.max(0, Number(metadata.stateRevision) || 0), comments: [], questionThreads: [], sessions, activeSessionId: validActive?.id || null,
-    settings: { targetUsername, recentTargets: recentTargets(metadata.settings?.recentTargets, targetUsername) }, gifts:Array.isArray(metadata.gifts)?metadata.gifts:[],giftAttention:Array.isArray(metadata.giftAttention)?metadata.giftAttention:[],giftSettings:{...DEFAULT_GIFT_SETTINGS,...metadata.giftSettings} };
+    settings: { targetUsername, recentTargets: recentTargets(metadata.settings?.recentTargets, targetUsername), roomCandidates: Array.isArray(metadata.settings?.roomCandidates) ? metadata.settings.roomCandidates.slice(-20) : [] }, gifts:Array.isArray(metadata.gifts)?metadata.gifts:[],giftAttention:Array.isArray(metadata.giftAttention)?metadata.giftAttention:[],giftSettings:{...DEFAULT_GIFT_SETTINGS,...metadata.giftSettings} };
   if(store.giftSettings.applyTo!=="final-only")store.giftSettings.applyTo="final-only";
   const service = new QuestionService(store);
   const oldThreads = Array.isArray(metadata.questionThreads) ? metadata.questionThreads : [];

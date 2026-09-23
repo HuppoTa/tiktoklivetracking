@@ -38,6 +38,7 @@
       <div id="sessionSummary" class="sessionSummary"></div>
       <div class="dangerZone"><button id="resetAnswers" class="btn ghost">Reset trạng thái trả bài</button><button id="deleteSession" class="btn danger">Xóa phiên đang xem</button></div>
     </section>
+    <section class="roomPanel panel" aria-labelledby="roomTitle"><div class="sessionTop"><div><span class="eyebrow">ROOM ID</span><h2 id="roomTitle">Các Room ID đã phát hiện</h2></div><div class="sessionControls"><button id="refreshRooms" class="btn ghost">Làm mới Room ID</button><button id="clearRooms" class="btn ghost">Clear cache</button></div></div><p class="hint">Room ID mới chỉ được dùng khi bạn chọn; session đang hoạt động không tự bị thay thế.</p><div id="roomCandidates" class="roomCandidates"><div class="empty compact">Chưa có Room ID candidate.</div></div><form id="manualRoomForm" class="manualRoomForm"><label for="manualRoomId">Chọn thủ công</label><input id="manualRoomId" inputmode="numeric" pattern="[0-9]{5,}" placeholder="Room ID hiện tại"><button class="btn" type="submit">Kết nối Room ID</button></form></section>
     <section class="stats">
       <article title="Số người đang xem tại sample TikTok gần nhất"><b id="currentViewers">—</b><span>Đang xem</span></article>
       <article title="Số người xem đồng thời cao nhất collector ghi nhận trong phiên"><b id="peakViewers">—</b><span>Cao nhất phiên</span></article>

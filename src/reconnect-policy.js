@@ -156,3 +156,8 @@ export async function connectWithRoomFallback(
     }
   }
 }
+
+export function isRoomIdResolutionError(error) {
+  return /failed to retrieve room id from all sources/i.test(String(error?.message || error)) ||
+    /failed to retrieve room_id from (?:all sources|page source|api-live)/i.test(String(error?.message || error));
+}

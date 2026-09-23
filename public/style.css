@@ -1204,3 +1204,4 @@ main {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation: none !important;
+.roomCandidates{display:grid;gap:8px}.roomCandidate{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--line,#26313a);border-radius:12px;background:rgba(255,255,255,.03)}.roomCandidate small{display:block;color:var(--muted,#9aa6b2);margin-top:3px}.roomStatus{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;font-size:10px;font-weight:700;background:#33404b;color:#d6e0e8}.roomStatus.active{background:#174d3b;color:#9dffd1}.roomStatus.expired,.roomStatus.unavailable{background:#5a2525;color:#ffc0c0}.roomStatus.new,.roomStatus.selected{background:#624a18;color:#ffe3a0}.roomError{color:#ff9f9f!important}.manualRoomForm{display:flex;align-items:end;gap:10px;margin-top:12px}.manualRoomForm label{display:grid;gap:5px;flex:1}.manualRoomForm input{width:100%;box-sizing:border-box}

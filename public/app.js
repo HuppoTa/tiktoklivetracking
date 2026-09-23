@@ -11,6 +11,7 @@ const API_BASE = String(globalThis.__APP_CONFIG__?.apiBaseUrl || "").replace(/\/
 const SOCKET_URL = String(globalThis.__APP_CONFIG__?.socketUrl || API_BASE || "").replace(/\/$/, "");
 const SOCKET_PATH = String(globalThis.__APP_CONFIG__?.socketPath || "/socket.io");
 const DEV_REMOTE = globalThis.__APP_CONFIG__?.devRemote === true;
+const LOCAL_MODE = String(globalThis.__APP_CONFIG__?.localMode || "");
 const TOKEN_KEY = "live-comment-hub-session";
 const WELCOME_DEBUG = ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
 let authToken = sessionStorage.getItem(TOKEN_KEY) || "";
@@ -372,8 +373,23 @@ function renderSessions() {
   $("sessionSummary").innerHTML = summary.length ? summary.map(([label, value]) => `<span>${esc(label)}<b>${esc(value)}</b></span>`).join("") : '<div class="empty compact"><b>Chưa có phiên LIVE.</b></div>';
 }
 
+function renderRoomCandidates() {
+  const candidates = Array.isArray(state.settings?.roomCandidates) ? state.settings.roomCandidates : [];
+  const active = state.status?.state === "live";
+  const readOnly = Boolean(LOCAL_MODE || DEV_REMOTE);
+  $("refreshRooms").disabled = readOnly || collectorActionInFlight;
+  $("clearRooms").disabled = readOnly || active || collectorActionInFlight;
+  $("manualRoomId").disabled = readOnly || active || collectorActionInFlight;
+  $("manualRoomForm").querySelector('button[type="submit"]').disabled = readOnly || active || collectorActionInFlight;
+  $("roomCandidates").innerHTML = candidates.length ? candidates.slice().reverse().map(item => {
+    const usable = !readOnly && !active && ["new", "selected", "stale"].includes(item.status);
+    const label = { new: "MỚI", active: "ĐANG DÙNG", selected: "ĐÃ CHỌN", expired: "HẾT HẠN", unavailable: "KHÔNG KHẢ DỤNG", stale: "CŨ/CHƯA XÁC MINH" }[item.status] || item.status;
+    return `<div class="roomCandidate"><div><b>${esc(item.roomId)}</b><span class="roomStatus ${esc(item.status)}">${label}</span><small>Nguồn: ${esc(item.source)} · lần cuối: ${esc(formatTime(item.lastSeenAt))}</small>${item.lastError ? `<small class="roomError">${esc(item.lastError)}</small>` : ""}</div><button class="btn ghost" data-select-room="${esc(item.roomId)}" ${usable ? "" : "disabled"}>Chọn</button></div>`;
+  }).join("") : '<div class="empty compact">Chưa có Room ID candidate.</div>';
+}
+
 function render() {
-  try { renderStats(); renderQueue(); renderComments(); renderStatus(); renderSessions(); }
+  try { renderStats(); renderQueue(); renderComments(); renderStatus(); renderSessions(); renderRoomCandidates(); }
   catch (error) { reportError(error, "Dashboard gặp lỗi khi hiển thị. Dữ liệu vẫn được giữ nguyên."); }
 }
 
@@ -726,6 +742,14 @@ async function loadSession(sessionId) {
   catch (error) { state = previous; reportError(error, `Không tải được phiên: ${error.message}`); render(); }
 }
 $("sessionSelect").addEventListener("change", event => { if (event.target.value) void loadSession(event.target.value); });
+$("roomCandidates").addEventListener("click", async event => {
+  const button = event.target.closest("[data-select-room]"); if (!button) return;
+  try { await requestJson("/api/room-candidates/select", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roomId: button.dataset.selectRoom }) }); await syncDashboardState(); toast("Đã chọn Room ID"); }
+  catch (error) { reportError(error, error.message); }
+});
+$("refreshRooms").addEventListener("click", async () => { try { await requestJson("/api/room-candidates/refresh", { method: "POST" }); await syncDashboardState(); } catch (error) { reportError(error, error.message); } });
+$("clearRooms").addEventListener("click", async () => { if (!window.confirm("Xóa cache Room ID của tài khoản hiện tại? Lịch sử session vẫn được giữ.")) return; try { await requestJson("/api/room-candidates/clear", { method: "POST" }); await syncDashboardState(); toast("Đã xóa cache Room ID"); } catch (error) { reportError(error, error.message); } });
+$("manualRoomForm").addEventListener("submit", async event => { event.preventDefault(); const roomId = $("manualRoomId").value.trim(); try { await requestJson("/api/room-candidates/select", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roomId }) }); await syncDashboardState(); toast("Đã kết nối Room ID thủ công"); } catch (error) { reportError(error, error.message); } });
 $("currentSession").addEventListener("click", () => { if (state.activeSession?.id) void loadSession(state.activeSession.id); });
 $("endSession").addEventListener("click", async () => {
   const session = state.selectedSession; if (!session || session.id !== state.activeSession?.id) return;

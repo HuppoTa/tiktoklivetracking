@@ -19,7 +19,8 @@ import { GiftService, validateGiftSettingsPatch } from "./src/gift-service.js";
 import { config as watchdogConfig, evaluate as evaluateWatchdog, shouldReconnect as watchdogShouldReconnect } from "./src/collector-watchdog.js";
 import { StreamEndConfirmation } from "./src/collector-lifecycle.js";
 import { buildWelcomeMemberPayload } from "./src/member-welcome.js";
-import { connectWithRoomFallback, describeConnectionError, errorSourceMessages, isOfflineError, reconnectBackoffMs, ReconnectController } from "./src/reconnect-policy.js";
+import { connectWithRoomFallback, describeConnectionError, errorSourceMessages, isOfflineError, isRoomIdResolutionError, reconnectBackoffMs, ReconnectController } from "./src/reconnect-policy.js";
+import { clearRoomCandidates, markRoomCandidate, upsertRoomCandidate } from "./src/room-candidates.js";
 import { AuthService, LoginRateLimiter, MemorySessionRepository, NeonSessionRepository } from "./src/auth-service.js";
 import { resolveLocalEnvironment } from "./src/local-environment.js";
 import { fetchProductionCollectorStatus, LocalLiveGuard } from "./src/local-live-guard.js";
@@ -78,6 +79,7 @@ const gifts = new GiftService(store);
 let targetUsername = resolveTarget(process.env.TIKTOK_USERNAME, store.settings?.targetUsername);
 if (sessions.active?.targetUsername !== targetUsername) sessions.switchTarget(targetUsername); else sessions.ensurePending(targetUsername);
 store.settings.targetUsername = targetUsername;
+store.settings.roomCandidates = Array.isArray(store.settings.roomCandidates) ? store.settings.roomCandidates : [];
 
 const app = express(); const httpServer = createServer(app); const io = new Server(httpServer, {
   path: REMOTE_BACKEND_MODE ? "/local-socket.io" : "/socket.io",
@@ -165,7 +167,7 @@ app.use(express.static(join(__dirname, "public")));
 const guard = new ConnectionGuard(); let connection = null; let connectionContext = null; let analyticsSaveTimer = null; let retentionTimer = null;
 let localLiveGuard = null;
 const reconnectController = new ReconnectController({ cooldownMs: RECONNECT_COOLDOWN_MS }); let reconnectFailureStreak = 0;
-let reconnectRequestVersion = 0;
+let reconnectRequestVersion = 0; let roomActionInFlight = false; let roomRefreshPromise = null;
 let watchdogTimer=null, connectionState="OFFLINE", pipelineFailureStreak=0;
 const streamEndConfirmation = new StreamEndConfirmation(2);
 const CHAT_FAILURE_DEGRADED_THRESHOLD=3;
@@ -369,6 +371,16 @@ const current = new TikTokLiveConnection(username, {
     }); if (connection !== current || !guard.isCurrent(generation)) return { ok: false, stale: true };
     if (approvedRoomId && String(result.roomId) !== String(approvedRoomId)) throw new Error("LOCAL_ROOM_CHANGED");
     guard.clearReconnect();
+    if (!approvedRoomId && cachedRoomId && String(cachedRoomId) !== String(result.roomId)) {
+      store.settings.roomCandidates = upsertRoomCandidate(store.settings.roomCandidates, { username, roomId: result.roomId, status: "new", source: "resolver" });
+      await stopConnection();
+      sessions.markOffline();
+      setConnectionState("OFFLINE");
+      setStatus({ state: "offline", message: "Đã phát hiện Room ID khác. Hãy chọn trên giao diện để chuyển phiên.", roomId: null, nextReconnectAt: null });
+      await storage.save();
+      return { ok: false, code: "ROOM_SELECTION_REQUIRED", roomId: result.roomId, retryScheduled: false };
+    }
+    store.settings.roomCandidates = upsertRoomCandidate(store.settings.roomCandidates, { username, roomId: result.roomId, status: "active", source: approvedRoomId ? "manual" : "resolver", selectedAt: new Date().toISOString() });
     const attached = sessions.attachRoom(username, result.roomId, generation, new Date()); if (!attached) throw new Error("TikTok không trả room ID hợp lệ"); telemetry.lastSuccessfulConnect=new Date().toISOString(); reconnectFailureStreak=0; telemetry.reconnectFailureStreak=0; acceptingChatEvents=true;
     streamEndConfirmation.observeConnected({ sessionId: attached.session.id, roomId: attached.session.roomId });
     context.sessionId = attached.session.id; context.roomId = attached.session.roomId;
@@ -389,7 +401,17 @@ const current = new TikTokLiveConnection(username, {
       try { notLive = (await current.fetchIsLive()) === false; } catch {}
     }
     const connectionHint = describeConnectionError(error);
-    const display = notLive ? `@${username} hiện chưa livestream. Hệ thống sẽ tự kiểm tra lại.` : connectionHint || `Không kết nối được: ${message}`;
+    const roomUnavailable = isRoomIdResolutionError(error) || sourceMessages.some(item => /room[_ ]?id/i.test(item));
+    const display = roomUnavailable ? `Không lấy được Room ID mới của @${username}. Hãy làm mới hoặc chọn Room ID thủ công.` : notLive ? `@${username} hiện chưa livestream. Hệ thống sẽ tự kiểm tra lại.` : connectionHint || `Không kết nối được: ${message}`;
+    if (roomUnavailable) {
+      guard.clearReconnect();
+      sessions.markOffline();
+      if (cachedRoomId) store.settings.roomCandidates = markRoomCandidate(store.settings.roomCandidates, cachedRoomId, "stale", display, new Date(), username);
+      setConnectionState("OFFLINE", generation);
+      setStatus({ state: "offline", message: display, roomId: null, nextReconnectAt: null }, generation);
+      await storage.save();
+      return { ok: false, error: display, code: "ROOM_ID_UNAVAILABLE", retryScheduled: false };
+    }
     const confirmation = notLive ? streamEndConfirmation.observeNotLive(activeSessionId()) : { confirmed: false };
     if (confirmation.confirmed) {
       const ended = sessions.closeActive("stream_end_confirmed");
@@ -402,6 +424,11 @@ const current = new TikTokLiveConnection(username, {
       return { ok: false, ended: true, error: display };
     }
     setConnectionState(reconnectFailureStreak>=MAX_RECONNECT_ATTEMPTS?"ERROR":"OFFLINE",generation);
+    if (reason === "manual_room_select") {
+      guard.clearReconnect();
+      setStatus({ state: "offline", message: display, roomId: null, nextReconnectAt: null }, generation);
+      return { ok: false, error: display, code: notLive ? "ROOM_EXPIRED" : "ROOM_UNAVAILABLE", retryScheduled: false };
+    }
     scheduleReconnect(generation, display, reason === "stream_end_signal" ? "stream_end_confirmation" : "connection_lost");
     return { ok: false, error: display };
   }
@@ -431,7 +458,7 @@ if (localConfig?.mode === "live") {
 function validId(value) { return typeof value === "string" && value.length > 0 && value.length <= 200 && /^[\w:.-]+$/u.test(value); }
 function validUserId(value) { return validId(value) && !["undefined","null"].includes(value); }
 function resolveSession(req, res, { required = false } = {}) { const id = String(req.query.sessionId || req.body?.sessionId || activeSessionId() || ""); const session = sessions.get(id); if (!session && (required || id)) { res.status(404).json({ error: "Không tìm thấy phiên" }); return null; } return session; }
-function stateFor(session) { const id = session?.id; const threads = id ? scopedThreads(id) : []; return { revision:Math.max(0,Number(store.stateRevision)||0), target: targetPayload(), settings: { recentTargets: store.settings.recentTargets, questionDebug: QUESTION_DEBUG },giftSettings:store.giftSettings, activeSession: activeSession(), selectedSession: session || null, sessions: sessions.list(), status, comments: id ? scopedComments(id) : [], questions: id ? questions.getQuestions({ sessionId: id }) : [], users: id ? questions.getUsers(id) : [],gifts:id?store.gifts.filter(g=>g.sessionId===id):[],giftAttention:id?store.giftAttention.filter(a=>a.sessionId===id):[], analytics: buildAnalytics(threads, session?.viewerAnalytics, id?store.gifts.filter(g=>g.sessionId===id):[],id?store.giftAttention.filter(a=>a.sessionId===id):[]) }; }
+function stateFor(session) { const id = session?.id; const threads = id ? scopedThreads(id) : []; return { revision:Math.max(0,Number(store.stateRevision)||0), target: targetPayload(), settings: { recentTargets: store.settings.recentTargets, roomCandidates: (store.settings.roomCandidates || []).filter(item => item.username === targetUsername), questionDebug: QUESTION_DEBUG },giftSettings:store.giftSettings, activeSession: activeSession(), selectedSession: session || null, sessions: sessions.list(), status, comments: id ? scopedComments(id) : [], questions: id ? questions.getQuestions({ sessionId: id }) : [], users: id ? questions.getUsers(id) : [],gifts:id?store.gifts.filter(g=>g.sessionId===id):[],giftAttention:id?store.giftAttention.filter(a=>a.sessionId===id):[], analytics: buildAnalytics(threads, session?.viewerAnalytics, id?store.gifts.filter(g=>g.sessionId===id):[],id?store.giftAttention.filter(a=>a.sessionId===id):[]) }; }
 function requireAnswered(req, res) { if (typeof req.body?.answered !== "boolean") { res.status(400).json({ error: "answered phải là boolean" }); return null; } return req.body.answered; }
 
 app.get("/api/health", (_req,res)=>res.json({status:"ok",process:{uptimeSeconds:Math.floor(process.uptime())}}));
@@ -463,6 +490,47 @@ app.post("/api/debug/welcome", (req, res) => {
 });
 
 app.get("/api/state", (req, res) => { const session = resolveSession(req, res); if ((req.query.sessionId || activeSessionId()) && !session) return; res.json(stateFor(session)); });
+app.get("/api/room-candidates", (_req, res) => res.json({ username: targetUsername, activeRoomId: activeSession()?.roomId || null, candidates: (store.settings.roomCandidates || []).filter(item => item.username === targetUsername) }));
+app.post("/api/room-candidates/clear", async (_req, res) => {
+  if (roomActionInFlight || reconnectController.inProgress || roomRefreshPromise) return res.status(409).json({ error: { code: "ROOM_ACTION_IN_PROGRESS", message: "Đang xử lý Room ID." } });
+  if (status.state === "live" && connection) return res.status(409).json({ error: { code: "ACTIVE_SESSION", message: "Hãy kết thúc phiên LIVE trước khi clear cache." } });
+  await stopConnection(); guard.invalidate(); reconnectFailureStreak = 0; telemetry.reconnectFailureStreak = 0;
+  if (activeSession()) sessions.closeActive("room_cache_refresh");
+  store.settings.roomCandidates = clearRoomCandidates(store.settings.roomCandidates, targetUsername); await storage.save();
+  setStatus({ state: "idle", message: "Đã xóa cache Room ID. Có thể làm mới hoặc chọn Room ID thủ công.", roomId: null, nextReconnectAt: null });
+  res.json({ ok: true, username: targetUsername, candidates: [] });
+});
+app.post("/api/room-candidates/refresh", async (_req, res) => {
+  if (DISABLE_TIKTOK) return res.status(409).json({ error: { code: "COLLECTOR_DISABLED", message: "TikTok connector đang tắt." } });
+  if (roomActionInFlight || roomRefreshPromise) return res.status(409).json({ error: { code: "ROOM_ACTION_IN_PROGRESS", message: "Đang xử lý Room ID." } });
+  roomRefreshPromise = (async () => {
+    const username = targetUsername;
+    const roomId = String(await new TikTokLiveConnection(username, { processInitialData: false, signApiKey: process.env.EULERSTREAM_API_KEY || "", sessionId: process.env.TIKTOK_SESSION_ID || "" }).fetchRoomId());
+    if (!/^\d{5,}$/.test(roomId) || username !== targetUsername) throw new Error("ROOM_ID_UNAVAILABLE");
+    const active = status.state === "live" && connection && String(activeSession()?.roomId) === roomId;
+    store.settings.roomCandidates = upsertRoomCandidate(store.settings.roomCandidates, { username, roomId, status: active ? "active" : "new", source: "resolver" });
+    await storage.save();
+    return { ok: true, roomId, status: active ? "active" : "new" };
+  })();
+  try { res.json(await roomRefreshPromise); }
+  catch { res.status(503).json({ error: { code: "ROOM_ID_UNAVAILABLE", message: "Không lấy được Room ID mới. Có thể nhập thủ công." } }); }
+  finally { roomRefreshPromise = null; }
+});
+app.post("/api/room-candidates/select", async (req, res) => {
+  if (DISABLE_TIKTOK) return res.status(409).json({ error: { code: "COLLECTOR_DISABLED", message: "TikTok connector đang tắt." } });
+  const roomId = String(req.body?.roomId || "").trim();
+  if (!/^\d{5,}$/.test(roomId)) return res.status(400).json({ error: { code: "INVALID_ROOM_ID", message: "Room ID không hợp lệ." } });
+  if (roomActionInFlight || reconnectController.inProgress || roomRefreshPromise) return res.status(409).json({ error: { code: "ROOM_ACTION_IN_PROGRESS", message: "Đang xử lý Room ID." } });
+  if (status.state === "live" && connection) return res.status(409).json({ error: { code: "ACTIVE_SESSION", message: "Session hiện tại vẫn đang hoạt động; hãy kết thúc session trước." } });
+  roomActionInFlight = true;
+  try {
+    await stopConnection(); guard.invalidate(); reconnectFailureStreak = 0; telemetry.reconnectFailureStreak = 0;
+    const result = await connectTikTok("manual_room_select", roomId);
+    if (!result.ok) store.settings.roomCandidates = markRoomCandidate(store.settings.roomCandidates, roomId, result.code === "ROOM_EXPIRED" ? "expired" : "unavailable", result.error || result.code, new Date(), targetUsername);
+    await storage.save();
+    res.status(result.ok ? 200 : 409).json(result);
+  } finally { roomActionInFlight = false; }
+});
 app.get("/api/sessions", (_req, res) => res.json(sessions.list()));
 app.get("/api/sessions/:id", (req, res) => { if (!validId(req.params.id)) return res.status(400).json({ error: "Session ID không hợp lệ" }); const session = sessions.get(req.params.id); return session ? res.json(stateFor(session)) : res.status(404).json({ error: "Không tìm thấy phiên" }); });
 app.get("/api/analytics", (req, res) => { const session = resolveSession(req, res, { required: true }); if (session) res.json(stateFor(session).analytics); });
