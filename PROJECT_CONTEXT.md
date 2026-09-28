@@ -9,6 +9,13 @@
 - Evidence: Regression coverage is `test/session-end-discard-e2e.test.js`; release verification and exact deployed commit are recorded after the automated test and push complete.
 - Status: release in progress; no LIVE connection is created by this release procedure.
 
+## UI checkpoint — Room ID candidates (2026-09-29)
+
+- Request: Repair and compact the Room ID candidate panel with expand/collapse; UI only.
+- Principle: Applied current canonical Principle set.
+- Task constraints: No API, collector, storage, Room ID selection semantics, production mutation or deployment action.
+- Changes/Evidence/Tests/Pending: Fixed the malformed CSS scope that caused Room ID/status/source text to concatenate. The selected/current candidate is visible and expanded; other candidates are grouped in an accessible native disclosure and retain their existing selection controls. The presentation adds no polling/listener or API work. Red-first `test/room-candidate-ui.test.js` passes; full `npm test` passes 165/165; syntax and diff checks pass. Pending: commit/push only; user deploys separately.
+
 ## Trạng thái hiện tại: manual queue + Gift Tracking (schema v7)
 
 Dashboard hỗ trợ ba nguồn thread: `classifier`, `promoted_comment`, `manual_entry`. Session isolation, TikTok `userId`, classifier scoring và dedupe `sessionId + userId` được giữ nguyên. `queueNumber` lấy từ `session.nextQueueNumber` và không tái sử dụng; `priorityRank` là lớp sắp xếp riêng. Migration v5 → v6 chỉ thêm metadata queue theo thứ tự deterministic, giữ nguyên comment, occurrence, repeatCount và answered state.

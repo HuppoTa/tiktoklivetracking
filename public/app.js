@@ -382,11 +382,16 @@ function renderRoomCandidates() {
   $("clearRooms").disabled = readOnly || active || collectorActionInFlight;
   $("manualRoomId").disabled = readOnly || active || collectorActionInFlight;
   $("manualRoomForm").querySelector('button[type="submit"]').disabled = readOnly || active || collectorActionInFlight;
-  $("roomCandidates").innerHTML = candidates.length ? candidates.slice().reverse().map(item => {
+  const roomCard = (item, { open = false, featured = false } = {}) => {
     const usable = !readOnly && !active && ["new", "selected", "stale"].includes(item.status);
     const label = { new: "MỚI", active: "ĐANG DÙNG", selected: "ĐÃ CHỌN", expired: "HẾT HẠN", unavailable: "KHÔNG KHẢ DỤNG", stale: "CŨ/CHƯA XÁC MINH" }[item.status] || item.status;
-    return `<div class="roomCandidate"><div><b>${esc(item.roomId)}</b><span class="roomStatus ${esc(item.status)}">${label}</span><small>Nguồn: ${esc(item.source)} · lần cuối: ${esc(formatTime(item.lastSeenAt))}</small>${item.lastError ? `<small class="roomError">${esc(item.lastError)}</small>` : ""}</div><button class="btn ghost" data-select-room="${esc(item.roomId)}" ${usable ? "" : "disabled"}>Chọn</button></div>`;
-  }).join("") : '<div class="empty compact">Chưa có Room ID candidate.</div>';
+    return `<details class="roomCandidateDetails roomCandidate ${featured ? "featured" : ""}" ${open ? "open" : ""}><summary><span class="roomCandidateIdentity"><b>${esc(item.roomId)}</b><span class="roomStatus ${esc(item.status)}">${esc(label)}</span></span><span class="roomCandidateDisclosure">Chi tiết</span></summary><div class="roomCandidateBody"><div><small>Nguồn: ${esc(item.source || "Chưa rõ")} · lần cuối: ${esc(formatTime(item.lastSeenAt))}</small>${item.lastError ? `<small class="roomError">${esc(item.lastError)}</small>` : ""}</div><button class="btn ghost" data-select-room="${esc(item.roomId)}" ${usable ? "" : "disabled"}>Chọn Room ID này</button></div></details>`;
+  };
+  const reversed = candidates.slice().reverse();
+  const activeRoomId = state.activeSession?.roomId;
+  const featured = reversed.find(item => item.roomId === activeRoomId) || reversed.find(item => item.status === "active") || reversed[0];
+  const remaining = reversed.filter(item => item !== featured);
+  $("roomCandidates").innerHTML = featured ? `${roomCard(featured, { open: true, featured: true })}${remaining.length ? `<details class="roomCandidateList"><summary>Các Room ID khác (${remaining.length})</summary><div class="roomCandidateListBody">${remaining.map(item => roomCard(item)).join("")}</div></details>` : ""}` : '<div class="empty compact">Chưa có Room ID candidate.</div>';
 }
 
 function render() {
