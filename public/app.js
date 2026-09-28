@@ -334,17 +334,18 @@ function renderComments() {
 
 function renderStatus() {
   const historical = state.selectedSession?.id && state.selectedSession.id !== state.activeSession?.id;
+  const collectionPaused = state.settings?.collectionPaused === true;
   $("message").textContent = historical ? `Đang xem lịch sử phiên ${formatTime(state.selectedSession.startedAt)}` : (state.status?.message || "Chưa kết nối");
   const badge = $("liveBadge");
   const connectionState = state.status?.state || "idle";
   badge.className = `badge ${connectionState}`;
   badge.innerHTML = `<i></i> ${connectionState === "live" ? "ĐANG LIVE" : connectionState === "connecting" ? "KẾT NỐI" : "OFFLINE"}`;
-  $("toggle").textContent = ["live", "connecting"].includes(connectionState) ? "Dừng thu" : "Bắt đầu thu"; $("toggle").disabled = historical || collectorActionInFlight;
+  $("toggle").textContent = ["live", "connecting"].includes(connectionState) ? "Dừng thu" : "Bắt đầu thu"; $("toggle").disabled = historical || collectionPaused || collectorActionInFlight;
   $("headerTarget").textContent = state.target?.displayUsername || `@${state.status?.username || "kathyuyen.ta"}`;
-  $("changeTarget").disabled = connectionState === "switching";
+  $("changeTarget").disabled = collectionPaused || connectionState === "switching";
   const retryAt = new Date(state.status?.nextReconnectAt || 0).getTime();
   const retrySeconds = Number.isFinite(retryAt) ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) : 0;
-  $("retry").hidden = connectionState !== "offline";
+  $("retry").hidden = collectionPaused || connectionState !== "offline";
   $("retry").disabled = collectorActionInFlight || retrySeconds > 0;
   $("retry").textContent = retrySeconds > 0 ? `Thử lại sau ${retrySeconds}s` : "Thử lại ngay";
   clearTimeout(reconnectCountdownTimer);
@@ -376,7 +377,7 @@ function renderSessions() {
 function renderRoomCandidates() {
   const candidates = Array.isArray(state.settings?.roomCandidates) ? state.settings.roomCandidates : [];
   const active = state.status?.state === "live";
-  const readOnly = Boolean(LOCAL_MODE || DEV_REMOTE);
+  const readOnly = Boolean(LOCAL_MODE || DEV_REMOTE || state.settings?.collectionPaused === true);
   $("refreshRooms").disabled = readOnly || collectorActionInFlight;
   $("clearRooms").disabled = readOnly || active || collectorActionInFlight;
   $("manualRoomId").disabled = readOnly || active || collectorActionInFlight;
@@ -753,14 +754,14 @@ $("manualRoomForm").addEventListener("submit", async event => { event.preventDef
 $("currentSession").addEventListener("click", () => { if (state.activeSession?.id) void loadSession(state.activeSession.id); });
 $("endSession").addEventListener("click", async () => {
   const session = state.selectedSession; if (!session || session.id !== state.activeSession?.id) return;
-  if (!window.confirm("Kết thúc phiên hiện tại? Comment và trạng thái trả bài vẫn được giữ.")) return;
-  try { await requestJson(`/api/sessions/${encodeURIComponent(session.id)}/end`, { method: "POST" }); toast("Đã kết thúc phiên"); }
+  if (!window.confirm("Kết thúc phiên hiện tại và xóa vĩnh viễn comment, câu hỏi, quà và analytics của phiên này? Dữ liệu không có backup.")) return;
+  try { await requestJson(`/api/sessions/${encodeURIComponent(session.id)}/end`, { method: "POST" }); socket.disconnect(); clearSelectedSessionState(state); state.settings.collectionPaused = true; render(); toast("Đã kết thúc và xóa dữ liệu phiên"); }
   catch (error) { reportError(error, error.message); }
 });
 $("startSession").addEventListener("click", async () => {
   const liveSession = state.activeSession?.status === "live" ? state.activeSession : null;
   if (liveSession && !window.confirm("Phiên đang LIVE sẽ được kết thúc trước khi bắt đầu phiên mới. Bạn muốn tiếp tục?")) return;
-  try { if (liveSession) await requestJson(`/api/sessions/${encodeURIComponent(liveSession.id)}/end`, { method: "POST" }); const data = await requestJson("/api/sessions/start", { method: "POST" }); if (data?.session?.id) await loadSession(data.session.id); toast(data?.connection?.ok ? "Đã bắt đầu phiên mới" : "Đã tạo phiên chờ TikTok LIVE"); }
+  try { if (liveSession) await requestJson(`/api/sessions/${encodeURIComponent(liveSession.id)}/end`, { method: "POST" }); const data = await requestJson("/api/sessions/start", { method: "POST" }); if (socket.disconnected) socket.connect(); if (data?.session?.id) await loadSession(data.session.id); toast(data?.connection?.ok ? "Đã bắt đầu phiên mới" : "Đã tạo phiên chờ TikTok LIVE"); }
   catch (error) { reportError(error, error.message); }
 });
 

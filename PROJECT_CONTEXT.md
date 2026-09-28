@@ -1,5 +1,14 @@
 # Project Context — TikTok LIVE Comment Hub
 
+## Release checkpoint — 2026-09-29
+
+- Request: Deploy the scoped end-session safety change to production.
+- Principle: Applied current canonical Principle set.
+- Task constraints: Production release is authorized by the current request. Preserve the existing architecture, do not expose credentials, and do not perform a destructive production smoke test.
+- Changes: Ending the active session now first locks collection, retires collector/reconnect/watchdog/deferred-save work, atomically discards that session's runtime records without a backup, and rejects further mutations until the existing explicit start-session action creates a fresh session. The lock persists across restart.
+- Evidence: Regression coverage is `test/session-end-discard-e2e.test.js`; release verification and exact deployed commit are recorded after the automated test and push complete.
+- Status: release in progress; no LIVE connection is created by this release procedure.
+
 ## Trạng thái hiện tại: manual queue + Gift Tracking (schema v7)
 
 Dashboard hỗ trợ ba nguồn thread: `classifier`, `promoted_comment`, `manual_entry`. Session isolation, TikTok `userId`, classifier scoring và dedupe `sessionId + userId` được giữ nguyên. `queueNumber` lấy từ `session.nextQueueNumber` và không tái sử dụng; `priorityRank` là lớp sắp xếp riêng. Migration v5 → v6 chỉ thêm metadata queue theo thứ tự deterministic, giữ nguyên comment, occurrence, repeatCount và answered state.
