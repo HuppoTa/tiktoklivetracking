@@ -373,7 +373,8 @@ function renderSessions() {
     ["Question occurrences", questionOccurrences], ["Question threads", state.questions.length], ["Chưa trả", state.questions.length - answeredThreads],
     ["Đã trả", answeredThreads], ["Viewer peak", selected.peakViewers ?? state.analytics?.viewers?.peak ?? "—"]
   ] : [];
-  $("sessionSummary").innerHTML = summary.length ? summary.map(([label, value]) => `<span>${esc(label)}<b>${esc(value)}</b></span>`).join("") : '<div class="empty compact"><b>Chưa có phiên LIVE.</b></div>';
+  $("sessionSummary").innerHTML = summary.length ? summary.map(([label, value]) => `<span>${esc(label)}<b>${esc(value)}</b></span>`).join("") : '<div class="sessionEmpty"><span class="sessionEmptyIcon" aria-hidden="true">◌</span><div><span class="eyebrow">SẴN SÀNG KHI BẠN CẦN</span><b>Chưa có phiên đang thu</b><p>Bắt đầu phiên mới để bắt đầu thu dữ liệu LIVE.</p></div></div>';
+  $("sessionActions").hidden = !selected;
 }
 
 function renderRoomCandidates() {
