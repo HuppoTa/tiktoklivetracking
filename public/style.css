@@ -256,6 +256,13 @@ main {
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
 }
 
+.badge.verifying,
+.badge.connecting {
+  background: rgba(230, 190, 103, 0.14);
+  color: #f6d78c;
+  border-color: rgba(230, 190, 103, 0.3);
+}
+
 .badge.offline,
 .badge.idle {
   background: rgba(255, 141, 141, 0.12);

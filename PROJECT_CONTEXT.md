@@ -16,6 +16,13 @@
 - Task constraints: No API, collector, storage, Room ID selection semantics, production mutation or deployment action.
 - Changes/Evidence/Tests/Pending: Fixed the malformed CSS scope that caused Room ID/status/source text to concatenate. The selected/current candidate is visible and expanded; other candidates are grouped in an accessible native disclosure and retain their existing selection controls. The presentation adds no polling/listener or API work. Red-first `test/room-candidate-ui.test.js` passes; full `npm test` passes 165/165; syntax and diff checks pass. Pending: commit/push only; user deploys separately.
 
+## Broadcast-status checkpoint — 2026-09-29
+
+- Request: Do not display `ĐANG LIVE` merely because a cached TikTok Room ID accepted a collector connection; show it only after a valid TikTok transport event confirms an active broadcast.
+- Principle: Applied current canonical Principle set.
+- Task constraints: Preserve collector, Socket.IO, storage and session semantics; no production/LIVE action or deployment.
+- Changes/Evidence/Tests/Pending: Added an additive `broadcastLive` status field. The green badge now requires a current-session TikTok event (`CHAT`, gift, viewer, like or member) and otherwise displays `ĐANG XÁC MINH LIVE`; `LIVE_IDLE` never claims a broadcast. `GET /api/ready` also exposes `collector.broadcastLive` without altering its existing collector-connectivity `live` field. Regression tests were red-first in `test/live-indicator.test.js`; targeted tests and full `npm test` pass 167/167; syntax and diff checks pass. Pending: no manual LIVE verification or deployment was performed.
+
 ## Trạng thái hiện tại: manual queue + Gift Tracking (schema v7)
 
 Dashboard hỗ trợ ba nguồn thread: `classifier`, `promoted_comment`, `manual_entry`. Session isolation, TikTok `userId`, classifier scoring và dedupe `sessionId + userId` được giữ nguyên. `queueNumber` lấy từ `session.nextQueueNumber` và không tái sử dụng; `priorityRank` là lớp sắp xếp riêng. Migration v5 → v6 chỉ thêm metadata queue theo thứ tự deterministic, giữ nguyên comment, occurrence, repeatCount và answered state.

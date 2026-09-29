@@ -6,6 +6,7 @@ import {
 import { normalizeTargetInput } from "./target-input.js";
 import { addGiftNotification, clearGiftNotifications, createGiftNotificationStore, dismissGiftNotification } from "./gift-notifications.js";
 import { addWelcome, clearWelcomeStore, createWelcomeStore, takeWelcomeBurst, WELCOME_GAP_MS, WELCOME_VISIBLE_MS } from "./welcome-notifications.js";
+import { liveIndicator } from "./live-indicator.js";
 
 const API_BASE = String(globalThis.__APP_CONFIG__?.apiBaseUrl || "").replace(/\/$/, "");
 const SOCKET_URL = String(globalThis.__APP_CONFIG__?.socketUrl || API_BASE || "").replace(/\/$/, "");
@@ -338,8 +339,9 @@ function renderStatus() {
   $("message").textContent = historical ? `Đang xem lịch sử phiên ${formatTime(state.selectedSession.startedAt)}` : (state.status?.message || "Chưa kết nối");
   const badge = $("liveBadge");
   const connectionState = state.status?.state || "idle";
-  badge.className = `badge ${connectionState}`;
-  badge.innerHTML = `<i></i> ${connectionState === "live" ? "ĐANG LIVE" : connectionState === "connecting" ? "KẾT NỐI" : "OFFLINE"}`;
+  const indicator = liveIndicator(state.status);
+  badge.className = `badge ${indicator.className}`;
+  badge.innerHTML = `<i></i> ${indicator.label}`;
   $("toggle").textContent = ["live", "connecting"].includes(connectionState) ? "Dừng thu" : "Bắt đầu thu"; $("toggle").disabled = historical || collectionPaused || collectorActionInFlight;
   $("headerTarget").textContent = state.target?.displayUsername || `@${state.status?.username || "kathyuyen.ta"}`;
   $("changeTarget").disabled = collectionPaused || connectionState === "switching";
