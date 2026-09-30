@@ -99,11 +99,12 @@ button:disabled {
 }
 
 .topbar {
-  height: 72px;
+  min-height: 72px;
   padding: 0 max(22px, calc((100vw - 1440px) / 2));
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   background: rgba(9, 13, 16, 0.94);
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -117,6 +118,7 @@ button:disabled {
   align-items: center;
   gap: 10px;
   color: #f5f7f5;
+  min-width: 0;
 }
 
 .brandMark {
@@ -131,7 +133,7 @@ button:disabled {
   font-weight: 900;
 }
 
-.brand div { display: flex; flex-direction: column; }
+.brand div { display: flex; flex-direction: column; min-width: 0; }
 
 .brand b {
   font-size: 14px;
@@ -147,11 +149,19 @@ button:disabled {
   color: var(--muted);
 }
 
+.brand b,
+.brand small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .actions {
   display: flex;
   align-items: center;
   gap: 9px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .btn,
@@ -794,8 +804,22 @@ main {
   text-decoration: underline;
   font-size: 11px;
   cursor: pointer;
-  padding: 0;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 1;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
+
+.linkBtn:hover:not(:disabled),
+.linkBtn:focus-visible { color: var(--text); }
+
+.linkBtn:disabled { cursor: not-allowed; }
 
 .targetModal {
   width: min(480px, calc(100% - 28px));
@@ -1315,9 +1339,27 @@ main {
   .stats { grid-template-columns: repeat(3, 1fr); }
   .filters input { width: 220px; }
   .completedDetails { grid-template-columns: repeat(2, 1fr); }
+  .sessionSummary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
+  .topbar {
+    height: auto;
+    min-height: 0;
+    flex-wrap: wrap;
+    align-items: stretch;
+    padding: 10px 14px;
+  }
+  .brand { flex: 1 1 100%; }
+  .actions {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    padding-bottom: 2px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .actions > .btn { flex: 0 0 auto; min-height: 44px; }
   main { padding: 14px; }
   .stats { grid-template-columns: repeat(2, 1fr); }
   .toolbar { align-items: stretch; flex-direction: column; }
@@ -1327,25 +1369,39 @@ main {
   .livePanel { order: 2; }
   .liveComments { height: 330px; }
   .observedMetrics .info { margin-left: 0; width: 100%; }
+  .sessionTop { align-items: stretch; flex-direction: column; }
+  .sessionControls { width: 100%; }
+  .sessionControls select { flex: 1 1 240px; min-width: 0; }
+  .sessionControls .btn { flex: 1 1 140px; min-height: 44px; }
+  .manualRoomForm { align-items: stretch; }
+}
+
+@media (max-width: 700px) {
+  .sessionSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hero { align-items: flex-start; flex-direction: column; gap: 16px; }
+  .hero .badge { align-self: flex-start; }
+  .filters { flex-direction: column; }
+  .filters > * { width: 100%; }
+  .observedMetrics { gap: 9px; }
 }
 
 @media (max-width: 520px) {
-  .topbar { padding: 0 12px; }
-  .brand small { display: none; }
+  .topbar { padding: 8px 12px; }
+  .brand { gap: 8px; }
+  .brandMark { width: 32px; height: 32px; border-radius: 11px; }
+  .brand b { font-size: 13px; }
+  .brand small { max-width: 180px; }
+  .linkBtn { font-size: 10px; padding-inline: 8px; }
   .btn { font-size: 11px; padding: 9px; }
   .hero { padding: 19px; }
   .hero h1 { font-size: 21px; }
-  .hero .badge { align-self: flex-start; }
   .stats { grid-template-columns: 1fr 1fr; }
   .stats b { font-size: 22px; }
-  .filters { flex-direction: column; }
   .tabs .tab { white-space: nowrap; padding: 9px; }
   .questionCard { padding: 12px; }
   .personRow time { display: none; }
   .completedDetails { grid-template-columns: 1fr; }
-  .observedMetrics { gap: 9px; }
   .toast { width: calc(100% - 28px); justify-content: space-between; }
-  .linkBtn { display: none; }
   .targetModal form { padding: 17px; }
   .giftToasts {
     right: 14px;
@@ -1353,6 +1409,16 @@ main {
     bottom: 14px;
   }
   .welcomeToasts { right: 12px; top: 116px; width: min(360px, calc(100vw - 24px)); }
+}
+
+@media (max-width: 480px) {
+  main { padding: 12px; }
+  .stats { grid-template-columns: 1fr; }
+  .sessionPanel { padding: 13px; }
+  .sessionSummary { grid-template-columns: 1fr; }
+  .sessionControls .btn { flex-basis: 100%; }
+  .modalActions { align-items: stretch; flex-direction: column-reverse; }
+  .modalActions .btn { width: 100%; min-height: 44px; }
 }
 
 ::-webkit-scrollbar {

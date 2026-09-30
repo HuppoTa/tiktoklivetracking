@@ -146,3 +146,21 @@ test("sparkling cosmic art uses a responsive 4K asset without forcing its downlo
   assert.ok(standardInfo.size < 350_000);
   assert.ok(retinaInfo.size < 800_000);
 });
+
+test("responsive stylesheet remains valid across dashboard breakpoints", () => {
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const braceDepth = [...withoutComments].reduce((depth, character) => depth + (character === "{" ? 1 : character === "}" ? -1 : 0), 0);
+
+  assert.equal(braceDepth, 0);
+  assert.match(css, /@media \(max-width:\s*900px\)[\s\S]*?\.topbar\s*\{[\s\S]*?height:\s*auto;[\s\S]*?flex-wrap:\s*wrap;/);
+  assert.match(css, /@media \(max-width:\s*900px\)[\s\S]*?\.actions\s*\{[\s\S]*?overflow-x:\s*auto;/);
+  assert.match(css, /@media \(max-width:\s*700px\)[\s\S]*?\.sessionSummary\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/);
+  assert.match(css, /@media \(max-width:\s*480px\)[\s\S]*?\.stats\s*\{[\s\S]*?grid-template-columns:\s*1fr;/);
+});
+
+test("target switch remains a direct, tablet-sized tap control", () => {
+  assert.match(html, /<button id="changeTarget" class="linkBtn" type="button"/);
+  assert.match(app, /\$\("changeTarget"\)\.addEventListener\("click", openTargetModal\)/);
+  assert.match(css, /\.linkBtn\s*\{[\s\S]*?min-width:\s*44px;[\s\S]*?min-height:\s*44px;[\s\S]*?touch-action:\s*manipulation;/);
+  assert.doesNotMatch(css, /@media \(max-width:\s*520px\)\s*\{[\s\S]*?\.linkBtn\s*\{\s*display:\s*none;/);
+});
