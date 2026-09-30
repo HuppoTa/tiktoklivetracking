@@ -106,8 +106,6 @@ button:disabled {
   justify-content: space-between;
   background: rgba(9, 13, 16, 0.94);
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
   position: sticky;
   top: 0;
   z-index: 40;
@@ -1398,11 +1396,26 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background-image: linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.012) 1px, transparent 1px);
-  background-size: 34px 34px;
-  mask-image: linear-gradient(to bottom, rgba(0,0,0,.52), transparent 72%);
-  opacity: .42;
+  background:
+    radial-gradient(circle at 13% 18%, rgba(255, 247, 255, .96) 0 1.7px, transparent 3.6px),
+    radial-gradient(circle at 82% 31%, rgba(203, 247, 255, .92) 0 1.5px, transparent 3.4px),
+    radial-gradient(circle at 66% 74%, rgba(255, 192, 236, .88) 0 1.6px, transparent 3.7px),
+    radial-gradient(circle at 28% 82%, rgba(213, 201, 255, .86) 0 1.4px, transparent 3.4px),
+    radial-gradient(46rem 30rem at 8% 16%, rgba(255, 112, 194, .28), transparent 69%),
+    radial-gradient(42rem 32rem at 96% 24%, rgba(190, 126, 255, .25), transparent 72%),
+    radial-gradient(31rem 21rem at 49% 82%, rgba(102, 220, 255, .14), transparent 72%),
+    radial-gradient(18rem 14rem at 56% 42%, rgba(255, 193, 235, .08), transparent 72%);
+  opacity: .84;
   z-index: -1;
+  transform: translate3d(-1%, -1%, 0) scale(1.05);
+  transform-origin: 50% 50%;
+  animation: energyDrift 42s cubic-bezier(.45, .05, .55, .95) infinite alternate;
+}
+
+@keyframes energyDrift {
+  0% { transform: translate3d(-1.5%, -1%, 0) scale(1.05); }
+  50% { transform: translate3d(1.5%, .8%, 0) scale(1.075); }
+  100% { transform: translate3d(-.8%, 1.5%, 0) scale(1.055); }
 }
 
 .loginView {
@@ -1658,4 +1671,192 @@ textarea:focus-visible {
   .roomPanelSummary small { display: none; }
   .roomPanelDisclosure { padding: 0 10px; }
   .roomPanelContent { padding: 12px; }
+}
+
+/* Hologram direction: one local static nebula image plus CSS color layers. */
+:root {
+  --holo-cyan: #82efff;
+  --holo-pink: #ff9fd4;
+  --holo-violet: #b798ff;
+  --holo-rose: #ff83c5;
+  --holo-orchid: #c28cff;
+  --holo-lime: #bfffc6;
+  --holo-copy-muted: #aeb9cf;
+  --holo-copy-secondary: #d8e0f0;
+  --holo-primary: #e76fbe;
+  --holo-surface: rgba(16, 21, 38, .86);
+  --holo-line: rgba(176, 216, 255, .22);
+  --muted: var(--holo-copy-muted);
+  --text-secondary: var(--holo-copy-secondary);
+}
+
+body {
+  position: relative;
+  isolation: isolate;
+  background-color: #090b22;
+  background:
+    radial-gradient(84rem 46rem at 6% -22%, rgba(255, 94, 185, .27), transparent 60%),
+    radial-gradient(70rem 52rem at 106% 4%, rgba(178, 109, 255, .26), transparent 61%),
+    radial-gradient(50rem 38rem at 50% 110%, rgba(102, 214, 255, .14), transparent 67%),
+    radial-gradient(30rem 18rem at 50% 18%, rgba(255, 217, 243, .055), transparent 76%),
+    linear-gradient(145deg, rgba(14, 9, 34, .84) 0%, rgba(24, 16, 56, .82) 47%, rgba(8, 17, 38, .88) 100%);
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background: url("/assets/pastel-cosmic-nebula-sparkle.webp") center / cover no-repeat;
+  background-image: image-set(
+    url("/assets/pastel-cosmic-nebula-sparkle.webp") type("image/webp") 1x,
+    url("/assets/pastel-cosmic-nebula-sparkle-4k.webp") type("image/webp") 2x
+  );
+  opacity: .88;
+}
+
+.topbar {
+  background: linear-gradient(90deg, rgba(11, 15, 31, .9), rgba(22, 19, 46, .86), rgba(8, 20, 33, .9));
+  border-bottom-color: rgba(130, 239, 255, .18);
+}
+
+.brandMark {
+  background: linear-gradient(135deg, var(--holo-cyan) 0%, var(--holo-violet) 48%, var(--holo-pink) 100%);
+  box-shadow: 0 10px 24px rgba(120, 170, 255, .24), 0 1px 0 rgba(255,255,255,.36) inset;
+}
+
+.hero {
+  background:
+    linear-gradient(115deg, rgba(78, 40, 111, .84), rgba(51, 51, 121, .80) 48%, rgba(115, 43, 109, .82)),
+    linear-gradient(135deg, var(--holo-pink), var(--holo-cyan));
+  border-color: rgba(230, 169, 255, .42);
+  box-shadow: 0 20px 50px rgba(31, 8, 54, .42), 0 0 0 1px rgba(255, 190, 234, .14) inset;
+}
+
+.hero::before {
+  width: 460px;
+  height: 460px;
+  right: -170px;
+  top: -310px;
+  background: radial-gradient(circle, rgba(255, 166, 224, .34), rgba(194, 140, 255, .20) 40%, transparent 68%);
+}
+
+.hero::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+  opacity: .30;
+  background:
+    radial-gradient(circle at 11% 24%, rgba(255, 246, 253, .92) 0 1.6px, transparent 3.5px),
+    radial-gradient(circle at 76% 68%, rgba(193, 239, 255, .84) 0 1.5px, transparent 3.4px),
+    linear-gradient(112deg, transparent 30%, rgba(255,255,255,.17) 50%, transparent 70%);
+}
+
+.hero .eyebrow { color: #bff5ff; }
+.hero h1 {
+  color: #fff7fd;
+  background: linear-gradient(100deg, #fff8fd 8%, #ffc4e5 45%, #d8bdff 86%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 2px 20px rgba(255, 168, 222, .18);
+}
+
+.panel {
+  position: relative;
+  isolation: isolate;
+  background:
+    linear-gradient(145deg, rgba(52, 30, 83, .68), rgba(16, 18, 45, .78)),
+    var(--holo-surface);
+  border-color: rgba(221, 179, 255, .22);
+  box-shadow: 0 18px 40px rgba(20, 5, 43, .28), 0 1px 0 rgba(255,224,244,.08) inset;
+}
+
+.panel > * { position: relative; z-index: 1; }
+
+.btn,
+.smallBtn {
+  background: linear-gradient(135deg, rgba(74, 68, 126, .9), rgba(27, 37, 66, .96));
+  border-color: rgba(183, 198, 255, .24);
+  box-shadow: 0 8px 18px rgba(27, 25, 79, .22), 0 1px 0 rgba(255,255,255,.15) inset;
+}
+
+#toggle,
+#loginButton,
+#connectTarget,
+#manualRoomForm .btn[type="submit"],
+#manualQuestion,
+#manualForm .btn[type="submit"],
+#saveGiftSettings {
+  background: linear-gradient(135deg, #8c5de0 0%, #bd62d5 50%, var(--holo-primary) 100%);
+  border-color: rgba(255, 194, 229, .42);
+  box-shadow: 0 10px 22px rgba(169, 67, 153, .28), 0 1px 0 rgba(255,255,255,.24) inset;
+}
+
+.btn.ghost {
+  background: linear-gradient(135deg, rgba(115, 208, 255, .08), rgba(232, 141, 207, .07));
+  border-color: rgba(161, 208, 255, .22);
+}
+
+.btn.ghost:hover {
+  background: linear-gradient(135deg, rgba(130, 239, 255, .18), rgba(255, 159, 212, .18));
+  border-color: rgba(170, 225, 255, .46);
+}
+
+.badge.live {
+  color: #e8ffec;
+  border-color: rgba(191, 255, 198, .42);
+  background: linear-gradient(135deg, rgba(79, 220, 157, .28), rgba(113, 202, 255, .2), rgba(202, 148, 255, .18));
+  box-shadow: 0 0 20px rgba(126, 238, 198, .15), 0 1px 0 rgba(255,255,255,.13) inset;
+}
+
+.badge.connecting,
+.badge.verifying {
+  color: #fff0cb;
+  border-color: rgba(255, 211, 142, .4);
+  background: linear-gradient(135deg, rgba(255, 197, 120, .26), rgba(255, 141, 202, .16), rgba(150, 150, 255, .16));
+}
+
+.stats article {
+  background: linear-gradient(145deg, rgba(57, 30, 88, .68), rgba(14, 19, 48, .80));
+  border-top-color: var(--holo-cyan);
+  box-shadow: 0 14px 28px rgba(3, 5, 21, .2), 0 1px 0 rgba(255,255,255,.055) inset;
+}
+.stats article:nth-child(2n) { border-top-color: var(--holo-rose); }
+.stats article:nth-child(3n) { border-top-color: var(--holo-orchid); }
+.stats b { color: #f9f6ff; text-shadow: 0 0 16px rgba(185, 152, 255, .15); }
+
+.tab.active {
+  background: linear-gradient(135deg, rgba(141, 71, 213, .96), rgba(232, 88, 177, .9));
+  border-color: rgba(255, 193, 235, .54);
+  box-shadow: 0 8px 22px rgba(154, 49, 152, .34), 0 1px 0 rgba(255,255,255,.2) inset;
+}
+
+.questionCard,
+.userCard,
+.roomCandidate,
+.roomCandidateList {
+  background: linear-gradient(145deg, rgba(32, 28, 63, .78), rgba(11, 18, 34, .95));
+  border-color: rgba(163, 207, 255, .16);
+}
+
+.questionCard { border-left-color: var(--holo-rose); }
+.activeQuestion {
+  border-color: rgba(130, 239, 255, .62);
+  background: linear-gradient(135deg, rgba(55, 35, 107, .96), rgba(12, 68, 96, .92), rgba(82, 34, 92, .93));
+  box-shadow: inset 0 0 24px rgba(130, 239, 255, .07), 0 0 24px rgba(183, 152, 255, .2);
+}
+
+.roomPanelSummary,
+.manualRoomForm {
+  background: linear-gradient(135deg, rgba(184, 83, 173, .19), rgba(112, 77, 193, .17), rgba(74, 201, 229, .09));
+}
+.roomPanelDisclosure { border-color: rgba(130, 239, 255, .3); color: var(--holo-cyan); }
+
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; transform: none; }
+  .hero::after { opacity: .28; }
 }
